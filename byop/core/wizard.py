@@ -11,12 +11,9 @@ from .paste import REQUIRED_KEYS, looks_like_provider_paste, parse_provider_past
 
 def _ask_models(provider_display: str) -> list[ModelConfig]:
     models: list[ModelConfig] = []
-    prompt.header("Models")
-    prompt.info(
-        "Configure one or more models. The first model becomes the default."
-    )
+    prompt.info("Models (first is default)")
     while True:
-        name = prompt.ask("Model ID (sent to the API, e.g. 'hy3')")
+        name = prompt.ask("Model ID")
         if not name:
             if models:
                 break
@@ -24,9 +21,9 @@ def _ask_models(provider_display: str) -> list[ModelConfig]:
             continue
 
         display = prompt.ask(
-            "Display name (blank to reuse model ID)", default="", allow_empty=True
+            "Display name (optional)", default="", allow_empty=True
         )
-        max_tokens = prompt.ask_int("Context window (max_tokens)", default=128000)
+        max_tokens = prompt.ask_int("Context window", default=128000)
         max_out = prompt.ask_int(
             "Max output tokens", default=32000
         )
@@ -37,12 +34,12 @@ def _ask_models(provider_display: str) -> list[ModelConfig]:
         )
         reasoning_value: str | None = reasoning or None
         caps = default_model_capabilities()
-        if prompt.confirm("Supports image input?", default=False):
+        if prompt.confirm("Supports images?", default=False):
             caps["images"] = True
-        if prompt.confirm("Streams thinking in a reasoning_content field?",
+        if prompt.confirm("Streams thinking as reasoning_content?",
                           default=False):
             caps["interleaved_reasoning"] = True
-        if prompt.confirm("Expects max_tokens (not max_completion_tokens)?",
+        if prompt.confirm("Requires max_tokens instead of max_completion_tokens?",
                           default=False):
             caps["max_tokens_parameter"] = True
 
@@ -71,11 +68,7 @@ def run_wizard(prefill: ProviderConfig | None = None) -> tuple[ProviderConfig, d
     ``use_env``).
     """
 
-    prompt.header("byop — Custom LLM provider setup")
-    prompt.info(
-        "Enter your provider details. Tool-specific settings are configured "
-        "when you set up each tool."
-    )
+    prompt.info("Provider")
 
     # First prompt: paste JSON or press Enter to fill in fields. We try to
     # detect a paste heuristically (multi-line, parseable JSON), and then only
@@ -83,7 +76,7 @@ def run_wizard(prefill: ProviderConfig | None = None) -> tuple[ProviderConfig, d
     pasted_prefill: ProviderConfig | None = None
     missing: list[str] = []
     pasted = prompt.ask(
-        "Paste provider JSON (or press Enter to fill in fields one at a time)",
+        "Paste provider JSON or press Enter",
         default="",
         allow_empty=True,
     )
@@ -117,7 +110,6 @@ def run_wizard(prefill: ProviderConfig | None = None) -> tuple[ProviderConfig, d
             provider_name = prefill.provider_name
         else:
             # Saved-profile prefill: confirm so the user can override.
-            prompt.info(f"  Provider name: {prefill.provider_name}")
             provider_name = prompt.ask(
                 "Provider name (Enter to keep)",
                 default=prefill.provider_name,
@@ -129,13 +121,12 @@ def run_wizard(prefill: ProviderConfig | None = None) -> tuple[ProviderConfig, d
         if pasted_prefill is not None:
             api_url = prefill.api_url
         else:
-            prompt.info(f"  API URL: {prefill.api_url}")
             api_url = prompt.ask(
                 "API base URL (Enter to keep)", default=prefill.api_url
             )
     else:
         api_url = prompt.ask(
-            "API base URL (e.g. 'https://api.example.com/v1')"
+            "API URL (e.g. https://api.example.com/v1)"
         )
 
     # api_key: only ask when missing. For a complete paste the user already
@@ -165,12 +156,12 @@ def run_wizard(prefill: ProviderConfig | None = None) -> tuple[ProviderConfig, d
         models = _ask_models(provider_name)
 
 
-    prompt.header("API key storage")
+    prompt.info("Key storage")
     use_keychain = prompt.confirm(
-        "Store key in macOS login keychain? (recommended)", default=True
+        "Store key in macOS Keychain?", default=True
     )
     use_env = prompt.confirm(
-        "Also export key as an environment variable in your shell profile?",
+        "Also export key in shell profile (plaintext)?",
         default=not use_keychain,
     )
 
@@ -190,7 +181,7 @@ def run_wizard(prefill: ProviderConfig | None = None) -> tuple[ProviderConfig, d
 
 def configure_zed_features(provider: ProviderConfig) -> ProviderConfig:
     """Ask about Zed-specific features only when setting up Zed."""
-    prompt.header("Zed features")
+    prompt.info("Zed settings")
     return replace(
         provider,
         set_default_agent=prompt.confirm(

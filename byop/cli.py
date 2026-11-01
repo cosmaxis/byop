@@ -311,14 +311,15 @@ def _run_default_landing() -> int:
     from .core import profiles as prof
 
     while True:
+        prompt.info("byop")
         if prof.profile_exists(prof.get_active_profile_name()):
-            _run_status()
+            profile = prof.load_profile()
+            prompt.info(f"Provider: {profile.provider_name}")
         else:
-            prompt.header("byop — Bring Your Own Provider")
-            prompt.info("No active provider yet.")
+            prompt.info("No provider selected.")
 
         action = prompt.choose(
-            "What would you like to do?",
+            "Choose an action",
             [
                 "Set up tools",
                 "Add provider",
@@ -567,11 +568,6 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
                 prefill = saved.to_provider_config(
                     api_key=_load_profile_api_key(saved)
                 )
-                prompt.header("byop — Custom LLM provider setup")
-                prompt.info(
-                    f"Loaded saved profile [bold]{saved.name}[/bold] "
-                    f"({saved.provider_name}). Press Enter to keep each field."
-                )
 
             collected, prefs = wizard.run_wizard(prefill=prefill)
             provider = collected
@@ -582,6 +578,7 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
         non_interactive = False
     if not use_keychain and not use_env:
         use_env = True
+
 
     # Dry-run is read-only: do not persist profile metadata or secrets.
     if not args.dry_run:
@@ -600,26 +597,10 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
         if not non_interactive and profile_name != active_name and prof.profile_exists(profile_name):
             prompt.error(f"Provider {profile_name!r} already exists. Switch to it or choose another name.")
             return 2
-        profile = prof.profile_from_provider(
-            provider, name=profile_name,
-            api_key_ref="keychain" if use_keychain else f"env:{provider.env_var_name()}",
-        )
-        if prof.profile_exists(profile_name):
-            prof.save_profile(profile, allow_overwrite=True, api_key=api_key)
-            prompt.info(f"Updated saved profile {profile_name!r}.")
-        else:
-            prof.save_profile(profile, api_key=api_key)
-            prompt.info(f"Saved profile {profile_name!r} (active).")
-        if profile_name != active_name:
-            prof.set_active_profile_name(profile_name)
-        if use_keychain and api_key:
-            from .core import keychain as kc
-            kc.keychain_set(provider.keychain_server(), api_key)
-
     # ---- Select targets --------------------------------------------------
     targets = _select_targets(args, interactive=not non_interactive)
     if not targets:
-        prompt.warn("No target applications selected. Nothing to do.")
+        prompt.info("No tools selected.")
         return 0
 
     if non_interactive and args.conflict == "prompt":
@@ -628,6 +609,21 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
             "Pass --conflict replace|skip|append for non-interactive runs."
         )
         return 2
+    if not args.dry_run:
+        profile = prof.profile_from_provider(
+            provider, name=profile_name,
+            api_key_ref="keychain" if use_keychain else f"env:{provider.env_var_name()}",
+        )
+        if prof.profile_exists(profile_name):
+            prof.save_profile(profile, allow_overwrite=True, api_key=api_key)
+        else:
+            prof.save_profile(profile, api_key=api_key)
+            prompt.info(f"Saved profile {profile_name!r} (active).")
+        if profile_name != active_name:
+            prof.set_active_profile_name(profile_name)
+        if use_keychain and api_key:
+            from .core import keychain as kc
+            kc.keychain_set(provider.keychain_server(), api_key)
     cli_flag = args.conflict if args.conflict and args.conflict != "prompt" else None
 
     def _pick(target) -> str:
@@ -662,9 +658,9 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
         try:
             conflict_action = _pick(target)
             installed = target.is_installed()
-            if not args.skip_install and not args.dry_run:
+            if not installed and not args.skip_install and not args.dry_run:
                 target.install(log=prompt.info)
-                if not installed and not target.is_installed():
+                if not target.is_installed():
                     prompt.warn(
                         f"{target.display_name} is still not installed; skipping setup."
                     )
@@ -1111,27 +1107,17 @@ def _select_targets(args, *, interactive: bool) -> list:
     if not interactive:
         return installed
 
-    prompt.header("Target applications")
-    prompt.info(
-        "byop can configure the following AI coding tools with this provider."
-    )
-    selected: list = []
-    for target in all_targets:
-        is_inst = target.name in installed_names
-        label = f"{target.display_name} (installed)" if is_inst \
-            else f"{target.display_name} (not installed)"
-        prompt.info(f"  - {label}")
-        if is_inst:
-            if prompt.confirm(f"Configure {target.display_name}?", default=True):
-                selected.append(target)
-        else:
-            question = (
-                f"Configure {target.display_name} without installing?"
-                if args.skip_install
-                else f"Install and configure {target.display_name}?"
-            )
-            if prompt.confirm(question, default=False):
-                selected.append(target)
+    labels = [
+        f"{target.display_name} ({'installed' if target.name in installed_names else 'not installed'})"
+        for target in all_targets
+    ]
+    if any(target.name not in installed_names for target in all_targets) and not (args.skip_install or args.dry_run):
+        prompt.info("Selected missing tools will be installed if supported.")
+    title = "Choose tools to preview" if args.dry_run else "Choose tools"
+    indexes = prompt.select_many(title, labels)
+    selected = [all_targets[index] for index in indexes]
+    if selected:
+        prompt.info("Selected: " + ", ".join(target.display_name for target in selected))
     return selected
 
 

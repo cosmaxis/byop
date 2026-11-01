@@ -81,3 +81,109 @@ def test_non_tty_selection_retries_invalid_input(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda _: next(answers))
     assert prompt.choose("Pick", ["A", "B"]) == "B"
     assert "Choose one of the displayed numbers" in capsys.readouterr().out
+
+
+def test_checklist_keyboard_toggles_multiple_and_restores_terminal():
+    import os
+    import pty
+    import select
+    import subprocess
+    import termios
+    import time
+
+    master, slave = pty.openpty()
+    before = termios.tcgetattr(slave)
+    env = {**os.environ, "TERM": "xterm"}
+    env.pop("BYOP_PLAIN", None)
+    child = subprocess.Popen(
+        [
+            sys.executable, "-c",
+            'from byop.core.prompt import select_many; print("selected=" + str(select_many("Tools", ["A", "B", "C"])))',
+        ],
+        stdin=slave, stdout=slave, stderr=slave, env=env,
+    )
+    output = b""
+    try:
+        deadline = time.monotonic() + 10
+        while b"Esc cancel" not in output and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.2)[0]:
+                output += os.read(master, 4096)
+        assert b"Esc cancel" in output
+        os.write(master, b" \x1b[B \x1b[B \x1b[A \r")
+        deadline = time.monotonic() + 10
+        while child.poll() is None and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.2)[0]:
+                output += os.read(master, 4096)
+        child.wait(timeout=1)
+        while select.select([master], [], [], 0)[0]:
+            output += os.read(master, 4096)
+        assert child.returncode == 0
+        assert b"selected=[0, 2]" in output
+        after = termios.tcgetattr(slave)
+        flags = termios.ECHO | termios.ICANON | termios.ISIG
+        assert after[3] & flags == before[3] & flags
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+        os.close(master)
+        os.close(slave)
+
+
+def test_checklist_plain_input_validates_and_preserves_order(monkeypatch, capsys):
+    answers = iter(["1,9", "3,1,3"])
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    assert prompt.select_many("Tools", ["A", "B", "C"]) == [0, 2]
+    output = capsys.readouterr().out
+    assert "Enter displayed numbers" in output
+    assert "\x1b" not in output
+
+
+def test_checklist_plain_enter_selects_nothing(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    assert prompt.select_many("Tools", ["A", "B"]) == []
+
+
+def test_narrow_terminal_uses_complete_plain_checklist():
+    import fcntl
+    import os
+    import pty
+    import select
+    import struct
+    import subprocess
+    import termios
+    import time
+
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 18, 0, 0))
+    child = subprocess.Popen(
+        [
+            sys.executable, "-c",
+            'from byop.core.prompt import select_many; print("selected=" + str(select_many("Tools", ["A", "Long option (not installed)"])))',
+        ],
+        stdin=slave, stdout=slave, stderr=slave, env={**os.environ, "TERM": "xterm"},
+    )
+    output = b""
+    try:
+        deadline = time.monotonic() + 10
+        while b"Enter for none" not in output and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.2)[0]:
+                output += os.read(master, 4096)
+        assert b"Long option (not installed)" in output
+        assert b"\x1b[" not in output
+        os.write(master, b"2\n")
+        deadline = time.monotonic() + 10
+        while child.poll() is None and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.2)[0]:
+                output += os.read(master, 4096)
+        child.wait(timeout=1)
+        while select.select([master], [], [], 0)[0]:
+            output += os.read(master, 4096)
+        assert child.returncode == 0
+        assert b"selected=[1]" in output
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+        os.close(master)
+        os.close(slave)

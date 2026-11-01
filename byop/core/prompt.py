@@ -80,55 +80,84 @@ def confirm(prompt: str, default: bool = False) -> bool:
     return raw in ("y", "yes", "1", "true")
 
 
-def choose(prompt: str, options: list[str], default_index: int = 0) -> str:
-    if sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM") != "dumb":
-        import termios
-        import tty
+def _use_cursor_menu(options: list[str], *, multiple: bool = False) -> bool:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    if os.environ.get("TERM") == "dumb" or os.environ.get("BYOP_PLAIN") == "1":
+        return False
+    try:
+        size = os.get_terminal_size(sys.stdout.fileno())
+    except OSError:
+        size = shutil.get_terminal_size(fallback=(80, 24))
+    if not size.columns or not size.lines:
+        size = shutil.get_terminal_size(fallback=(80, 24))
+    prefix = 6 if multiple else 2
+    return size.lines >= len(options) + 3 and all(len(option) + prefix < size.columns for option in options)
 
-        fd = sys.stdin.fileno()
-        previous = termios.tcgetattr(fd)
-        index = default_index
 
-        def draw() -> None:
-            width = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns - 4)
-            for i, option in enumerate(options):
-                marker = "›" if i == index else " "
-                sys.stdout.write(f"\r\033[2K{marker} {option[:width]}\n")
-            sys.stdout.flush()
+def _cursor_menu(prompt: str, options: list[str], default_index: int, *, multiple: bool) -> list[int]:
+    import termios
+    import tty
 
-        try:
-            tty.setcbreak(fd)
+    fd = sys.stdin.fileno()
+    previous = termios.tcgetattr(fd)
+    index = default_index
+    selected: set[int] = set()
+
+    def draw() -> None:
+        lines = []
+        for i, option in enumerate(options):
+            marker = ">" if i == index else " "
+            checkbox = ("[x] " if i in selected else "[ ] ") if multiple else ""
+            lines.append(f"\r\033[2K{marker} {checkbox}{option}\n")
+        sys.stdout.write("".join(lines))
+        sys.stdout.flush()
+
+    try:
+        tty.setcbreak(fd)
+        if multiple:
+            sys.stdout.write(f"{_PROMPT_PREFIX}{prompt}\n  ↑/↓ move  Space select  Enter continue  Esc cancel\n")
+        else:
             sys.stdout.write(f"{_PROMPT_PREFIX}{prompt} (↑/↓ to move, Enter to select)\n")
-            draw()
-            while True:
+        draw()
+        while True:
+            key = os.read(fd, 1)
+            if not key or key == b"\x04":
+                raise EOFError
+            if key in (b"\r", b"\n"):
+                return sorted(selected) if multiple else [index]
+            if key == b" " and multiple:
+                if index in selected:
+                    selected.remove(index)
+                else:
+                    selected.add(index)
+            elif key == b"\x1b":
+                if not select.select([fd], [], [], 0.1)[0]:
+                    raise KeyboardInterrupt
+                prefix = os.read(fd, 1)
+                if prefix not in (b"[", b"O") or not select.select([fd], [], [], 0.1)[0]:
+                    continue
                 key = os.read(fd, 1)
-                if not key or key == b"\x04":
-                    raise EOFError
-                if key in (b"\r", b"\n"):
-                    return options[index]
-                if key == b"\x1b":
-                    if not select.select([fd], [], [], 0.1)[0]:
-                        raise KeyboardInterrupt
-                    prefix = os.read(fd, 1)
-                    if prefix not in (b"[", b"O") or not select.select([fd], [], [], 0.1)[0]:
-                        continue
-                    key = os.read(fd, 1)
-                    if key == b"A":
-                        index = (index - 1) % len(options)
-                    elif key == b"B":
-                        index = (index + 1) % len(options)
-                    else:
-                        continue
-                elif key in (b"k", b"j"):
-                    index = (index + (-1 if key == b"k" else 1)) % len(options)
+                if key == b"A":
+                    index = (index - 1) % len(options)
+                elif key == b"B":
+                    index = (index + 1) % len(options)
                 else:
                     continue
-                sys.stdout.write(f"\033[{len(options)}A")
-                draw()
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+            elif key in (b"k", b"j"):
+                index = (index + (-1 if key == b"k" else 1)) % len(options)
+            else:
+                continue
+            sys.stdout.write(f"\033[{len(options)}A")
+            draw()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, previous)
 
-    # Non-interactive input keeps a numbered fallback for scripts and pipes.
+
+def choose(prompt: str, options: list[str], default_index: int = 0) -> str:
+    if _use_cursor_menu(options):
+        return options[_cursor_menu(prompt, options, default_index, multiple=False)[0]]
+
     print(_PROMPT_PREFIX + prompt)
     for i, option in enumerate(options):
         print(f"  {i + 1}. {option}")
@@ -139,6 +168,26 @@ def choose(prompt: str, options: list[str], default_index: int = 0) -> str:
         if raw.isdigit() and 1 <= int(raw) <= len(options):
             return options[int(raw) - 1]
         warn("Choose one of the displayed numbers.")
+
+
+def select_many(prompt: str, options: list[str]) -> list[int]:
+    """Select zero or more options, returning their indexes in display order."""
+    if not options:
+        return []
+    if _use_cursor_menu(options, multiple=True):
+        return _cursor_menu(prompt, options, 0, multiple=True)
+
+    print(_PROMPT_PREFIX + prompt)
+    for i, option in enumerate(options):
+        print(f"  {i + 1}. {option}")
+    while True:
+        raw = _strip_escape_chars(input("Numbers separated by commas (Enter for none): ")).strip()
+        if not raw:
+            return []
+        parts = [part.strip() for part in raw.split(",")]
+        if all(part.isdigit() and 1 <= int(part) <= len(options) for part in parts):
+            return sorted({int(part) - 1 for part in parts})
+        warn("Enter displayed numbers separated by commas.")
 
 
 def header(title: str) -> None:

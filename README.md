@@ -111,16 +111,18 @@ pipx install "git+https://github.com/Cosmaxis/byop.git"
 byop
 ```
 
-Use the arrow keys and Enter to choose **Set up tools**, **Add provider**,
-**Switch provider**, **Edit active provider**, or **Quit**. When input is piped
-instead of a terminal, the menu accepts numbers.
+Use ↑/↓ and Enter to navigate the menu. To set up tools, move with ↑/↓,
+toggle each checkbox with Space, then press Enter. No tools are selected by
+default; selecting a missing tool attempts installation when supported.
+Escape or Ctrl-C cancels.
 
-**Add provider** asks for the provider name once and uses it as the saved
-profile name. Existing profiles keep their names. **Set up tools** creates a
-provider if needed, then asks which apps to configure. Missing apps default
-to **no**; if installation fails, setup is skipped. Zed-specific feature
-questions appear only when Zed is selected for setup. **Switch provider**
-selects a saved profile without changing app settings until you set up tools.
+Set `BYOP_PLAIN=1` for line-based numbered menus, including in a terminal.
+Piped input and terminals too small for the checklist use this fallback
+automatically.
+
+**Add provider** uses the provider name as the saved profile name. Existing
+profiles keep their names. Zed-specific questions appear only when setting up
+Zed. **Switch provider** selects a profile without changing tool settings.
 
 Non-interactive runs without `--target` configure detected apps only. Pass an
 explicit `--target` to select a missing app; with `--skip-install`, byop writes
