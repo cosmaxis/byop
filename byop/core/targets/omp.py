@@ -352,6 +352,9 @@ class OmpTarget(PyTarget):
             models_path = profile_models_path(profile, config_root)
         super().__init__(models_path=models_path or DEFAULT_MODELS_PATH)
 
+    def _format_dry_run(self, fragment: dict) -> str:
+        return _emit_models_yaml(fragment).rstrip("\n")
+
     # omp reads ~/.omp/agent/models.yml (NOT models.json). Override _load /
     # _write to round-trip the same fragment through YAML instead of JSON.
     # No PyYAML dependency — a small stdlib emitter/parser handles the

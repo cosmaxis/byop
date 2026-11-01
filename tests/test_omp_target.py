@@ -71,7 +71,8 @@ def test_omp_profile_configure_does_not_touch_global_models(tmp_path, monkeypatc
 
     target = OmpTarget(profile="cosmaxis")
     with mock.patch.object(target, "install"), \
-         mock.patch("byop.core.targets.py.kc.keychain_has", return_value=True):
+         mock.patch("byop.core.targets.py.kc.keychain_has", return_value=True), \
+         mock.patch("byop.core.targets.py.kc.ensure_key", return_value=["k:x"]):
         target.configure(_provider(), log=lambda m: None)
 
     assert "Global" in global_models.read_text()
@@ -84,7 +85,8 @@ def test_omp_configure_never_writes_literal_secret_with_keychain(tmp_path):
     models = tmp_path / "models.yml"
     target = OmpTarget(models_path=models)
     with mock.patch.object(target, "install"), \
-         mock.patch("byop.core.targets.py.kc.keychain_has", return_value=True):
+         mock.patch("byop.core.targets.py.kc.keychain_has", return_value=True), \
+         mock.patch("byop.core.targets.py.kc.ensure_key", return_value=["k:x"]):
         target.configure(_provider(), log=lambda m: None)
 
     text = models.read_text()
@@ -103,7 +105,8 @@ def test_omp_configure_writes_to_omp_path(tmp_path):
     models = tmp_path / "models.yml"
     target = OmpTarget(models_path=models)
     with mock.patch.object(target, "install"), \
-         mock.patch("byop.core.targets.py.kc.keychain_has", return_value=True):
+         mock.patch("byop.core.targets.py.kc.keychain_has", return_value=True), \
+         mock.patch("byop.core.targets.py.kc.ensure_key", return_value=["k:x"]):
         target.configure(_provider(), log=lambda m: None)
     text = models.read_text()
     assert "Cosmaxis:" in text
@@ -157,7 +160,8 @@ def test_omp_warns_when_appending_under_suffix(tmp_path):
     target = OmpTarget(models_path=models)
     messages = []
     with mock.patch.object(target, "install"), \
-         mock.patch("byop.core.targets.py.kc.keychain_has", return_value=True):
+         mock.patch("byop.core.targets.py.kc.keychain_has", return_value=True), \
+         mock.patch("byop.core.targets.py.kc.ensure_key", return_value=["k:x"]):
         target.configure(
             _provider(), conflict_action="append",
             log=lambda m: messages.append(m),
@@ -188,3 +192,20 @@ def test_omp_detect_installed_uses_PATH_or_dir():
         with mock.patch.object(Path, "exists", return_value=False), \
              mock.patch.object(shutil, "which", return_value=None):
             assert target.is_installed() is False
+
+
+def test_omp_dry_run_emits_yaml_without_leaking_secret(tmp_path):
+    models = tmp_path / "models.yml"
+    target = OmpTarget(models_path=models)
+    logs: list[str] = []
+    with mock.patch("byop.core.targets.py.kc.keychain_has") as khas, \
+         mock.patch("byop.core.targets.py.kc.ensure_key") as ek:
+        target.configure(_provider(), dry_run=True, use_keychain=False, log=logs.append)
+    assert not models.exists()
+    khas.assert_not_called()
+    ek.assert_not_called()
+    joined = "\n".join(logs)
+    assert "models.yml" in joined
+    assert "providers:" in joined
+    assert "sk-12345678" not in joined
+    assert "[REDACTED]" in joined

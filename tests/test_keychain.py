@@ -102,6 +102,39 @@ def test_write_env_appends_once(tmp_path, monkeypatch):
     assert prof.read_text().count('export PROV_API_KEY="sk-1"') == 1
 
 
+
+def test_write_env_replaces_existing_value_on_rotation(tmp_path, monkeypatch):
+    prof = tmp_path / ".zshrc"
+    prof.write_text('# header\nexport PROV_API_KEY="sk-old"\nexport OTHER=1\n')
+    monkeypatch.setattr(kc, "profile_candidates", lambda: [prof])
+    kc.write_env_to_profile("PROV_API_KEY", "sk-new", profile=prof)
+    content = prof.read_text()
+    assert "sk-old" not in content
+    assert 'export PROV_API_KEY="sk-new"' in content
+    assert "export OTHER=1" in content
+
+
+def test_ensure_key_keychain_env_writes_no_plaintext(tmp_path, monkeypatch):
+    prof = tmp_path / ".zshrc"
+    prof.write_text("# header\n")
+    monkeypatch.setattr(kc, "profile_candidates", lambda: [prof])
+    monkeypatch.setattr(kc, "Path", mock.Mock(home=lambda: tmp_path))
+    with mock.patch.object(kc, "keychain_set") as kset:
+        notes = kc.ensure_key(
+            "https://api.example.com/v1",
+            "sk-super-secret",
+            "PROV_API_KEY",
+            use_keychain=True,
+            use_env=False,
+            keychain_env=True,
+            log=lambda _: None,
+        )
+    kset.assert_called_once_with("https://api.example.com/v1", "sk-super-secret")
+    assert any(n.startswith("keychain_env:") for n in notes)
+    content = prof.read_text()
+    assert "sk-super-secret" not in content
+    assert "security find-internet-password" in content
+
 def test_ensure_key_keychain_only(tmp_path, monkeypatch):
     monkeypatch.setattr(kc, "LOGIN_KEYCHAIN", str(tmp_path / "keychain"))
     stored = {}

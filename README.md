@@ -42,11 +42,29 @@ writes your secret to disk in plaintext.
 | --- | --- | --- |
 | `zed` (Zed) | `~/.config/zed/settings.json` | Homebrew cask / direct download |
 | `py` (py.dev / Pi) | `~/.pi/agent/models.json` | Homebrew cask |
-| `omp` (oh-my-pi / Oh My Pi) | `~/.omp/agent/models.json` | `brew install can1357/tap/omp` / `curl -fsSL https://omp.sh/install | sh` |
+| `omp` (oh-my-pi / Oh My Pi) | `~/.omp/agent/models.yml` | `brew install can1357/tap/omp` / `curl -fsSL https://omp.sh/install | sh` |
 | `claude` (Claude Code) | `~/.claude/settings.json` | `brew install --cask claude-code` / `npm i -g @anthropic-ai/claude-code` / `curl -fsSL https://claude.ai/install.sh | sh` |
-| `warp` (Warp) | `~/.warp/settings.toml` (read-only) | Homebrew cask / https://www.warp.dev/download |
+| `opencode` (OpenCode) | `~/.config/opencode/opencode.json` | `brew install --cask opencode` / `curl -fsSL https://opencode.ai/install | sh` |
+| `warp` (Warp) | `~/.warp/settings.toml` + macOS Keychain | Homebrew cask / https://www.warp.dev/download |
 
-Warp support currently prints exact values for manual entry in Warp Settings > AI > Custom inference endpoint. Warp's endpoint TOML schema is undocumented and unverified, so byop never guesses keys or writes the settings file; API keys are redacted from output. Warp requires a public HTTPS endpoint (local/private URLs are rejected). `--conflict replace` and `skip` are accepted; `append` is rejected because Warp has one active endpoint. Unattended secure-storage automation is not supported: Warp's private `AiApiKeys` blob has no documented external write contract. Tracking request: [warpdotdev/warp#14721](https://github.com/warpdotdev/warp/issues/14721).
+### Claude Code & OpenCode
+
+- **Claude Code (`--target claude`)** configures `apiKeyHelper` (reading from the macOS login keychain), `env.ANTHROPIC_BASE_URL` (automatically stripping a trailing `/v1` segment because Claude Code posts to `$ANTHROPIC_BASE_URL/v1/messages`), and `model` in `~/.claude/settings.json`. Your upstream gateway **must** expose an Anthropic Messages-compatible `/v1/messages` endpoint (e.g. LiteLLM, Bifrost, OpenRouter).
+- **OpenCode (`--target opencode`)** writes `{env:<PROVIDER>_API_KEY}` under `provider.<Name>.options.apiKey` in `~/.config/opencode/opencode.json` and exports that variable dynamically from the macOS login keychain in your shell profile (`~/.zshrc`), keeping plaintext secrets off disk. Open a new terminal (or `source ~/.zshrc`) before running `opencode`.
+
+### Warp
+
+`byop --target warp --skip-install` configures a custom endpoint using **OpenAI Chat Completions**. Supply provider details in the wizard, or apply an existing profile with `byop apply --target warp --skip-install`. Use `https://api.cosmaxis.com/v1` and model `pro` for the Cosmaxis setup verified on Warp `0.2026.10.21.08.25.02`.
+
+- The installed app's `Contents/Resources/settings_schema.json` must describe the supported endpoint/model format. Older or incompatible versions fall back to redacted manual instructions. `--no-keychain` also requires manual setup; Warp does not use a shell environment-variable reference for this credential.
+- Non-secret endpoints live in `agents.custom_endpoints`. Model UUIDs remain stable on reapply. The first model becomes the default agent model when default-agent selection is enabled. Other endpoints, permissions, settings, and comments are preserved; the first original file is backed up to `settings.toml.bak` with owner-only permissions.
+- Keys live in Warp Stable's generic-password item: service `dev.warp.Warp-Stable`, account `AiCustomEndpointKeys`, encoded as a JSON map of endpoint IDs to keys. Native Security.framework calls keep new secrets out of process arguments. Existing items are updated in place to preserve their access controls; other endpoint keys are preserved. Keychain authorization may require local interaction. The legacy `AiApiKeys` item is not modified.
+- **Save active work, fully quit Warp with Cmd-Q, then reopen it. A new tab is not enough:** Warp caches API keys in memory. Select the custom model, not Auto. `byop` never quits Warp or interrupts terminal tasks automatically.
+- Warp requires a public HTTPS endpoint. Prompts, context, endpoint URL, and key pass through **Warp's servers** before reaching your provider. See [Warp's custom endpoint documentation](https://docs.warp.dev/agents/inference/custom-inference-endpoint/).
+
+`--conflict replace` updates the matching provider, preserving other endpoints; `skip` leaves an existing matching provider and key untouched. Replacements that would leave execution profiles referencing removed models are rejected. Symlink-managed settings require manual setup rather than replacing the link. `append` remains unsupported by this target. `--dry-run`, status, and export never read or write Warp's Keychain item. Setup does not perform inference or prove upstream tool/streaming compatibility.
+
+The October 26, 2026 Cosmaxis diagnosis established that Warp's Anthropic Messages path emitted tool schemas with `required: null`, which the configured upstream rejected. The Chat Completions path passed streaming inference and a terminal-tool round trip. This is why the target uses `openai_chat_completions`, rather than assuming Anthropic or Responses compatibility from a basic API test.
 
 ## Installation
 
@@ -108,7 +126,7 @@ tools and asks which to configure:
 | Flag | Purpose |
 | --- | --- |
 | `--target {zed,py,omp,claude,opencode,warp}` | Configure only the named target(s); repeatable. Defaults to all detected apps. |
-| `--conflict {replace,skip,append,prompt}` | What to do when a provider with the same name already exists on a target. Default: prompt interactively; `replace` for zed/claude, `append` for py/omp in non-interactive mode. |
+| `--conflict {replace,skip,append,prompt}` | What to do when a provider with the same name already exists on a target. Default: prompt interactively; `replace` for zed/claude/warp, `append` for py/omp/opencode in non-interactive mode. |
 | `--settings PATH` | Override the Zed settings path (default `~/.config/zed/settings.json`). |
 | `--dry-run` | Print the configuration fragments that *would* be written; change nothing. |
 | `--no-keychain` | Skip the macOS keychain (falls back to an embedded key — less secure). |
@@ -248,11 +266,11 @@ what to do:
   entry is still ensured.
 - **append** — write under `<ProviderName>_2`, `<ProviderName>_3`, … so the new
   provider lives alongside the existing one. Only available for targets that
-  support multiple concurrent providers (py.dev, omp).
+  support multiple concurrent providers (py.dev, omp, opencode).
 
 For non-interactive / scripted runs, pass `--conflict replace|skip|append`
 to skip the prompt. The default in non-interactive mode is `replace` for
-Zed/Claude Code and `append` for py.dev/omp.
+Zed/Claude Code/Warp and `append` for py.dev/omp/OpenCode.
 
 The wizard's first prompt also accepts a pasted JSON block. If your provider
 description is already in a file, you can pipe it: `pbpaste | xargs -0 byop`

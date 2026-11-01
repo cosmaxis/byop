@@ -103,10 +103,7 @@ def run_wizard(prefill: ProviderConfig | None = None) -> tuple[ProviderConfig, d
     def _have(field: str) -> bool:
         if pasted_prefill is not None:
             return field not in missing
-        # Saved-profile prefill: every field is "known" (api_key may be empty
-        # when stored as a keychain reference, so we always re-prompt for it).
-        return prefill is not None and field != "api_key"
-
+        return prefill is not None
     def _present(field: str) -> bool:
         """True when prefill has a non-empty value for this field."""
         if not _have(field) or prefill is None:
@@ -146,9 +143,9 @@ def run_wizard(prefill: ProviderConfig | None = None) -> tuple[ProviderConfig, d
     if prefill is not None and _present("api_key") and pasted_prefill is not None:
         api_key = prefill.api_key
     elif prefill is not None and _present("api_key"):
-        # Saved profile — re-prompt so we don't echo the secret.
-        prompt.info("  API key: (loaded from keychain — press Enter to keep)")
-        api_key = prompt.ask_secret("API key")
+        # Saved profile — re-prompt without echoing; empty input keeps stored secret.
+        prompt.info("  API key: (loaded — press Enter to keep)")
+        api_key = prompt.ask_secret("API key") or prefill.api_key
     else:
         api_key = prompt.ask_secret("API key")
 

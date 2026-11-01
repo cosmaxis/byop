@@ -55,13 +55,15 @@ def resolve_conflict_action(
     if conflict_flag is not None:
         return ConflictAction(conflict_flag)
 
-    # No collision: there's nothing to ask about. Use the target's default,
-    # unless interactive mode would have asked regardless — in that case we
-    # still return the default so non-interactive behavior is consistent.
+    # No collision: nothing to ask about, even in interactive mode.
+    if not has_collision:
+        default_action = default_conflict_action(target_name, interactive=False)
+        assert default_action is not None
+        return ConflictAction(default_action)
+
     chosen = default_conflict_action(target_name, interactive=interactive)
     if chosen is not None:
         return ConflictAction(chosen)
-
     # Interactive + collision: caller will run the chooser.
     assert interactive and has_collision
     return None

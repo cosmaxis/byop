@@ -338,11 +338,7 @@ def _run_default_landing() -> int:
             continue
         if action in ("apply", "a", ""):
             profile = prof.load_profile()
-            if profile.api_key_ref == "keychain":
-                from .core import keychain as kc
-                api_key = kc.keychain_get(profile.api_url.rstrip("/")) or ""
-            else:
-                api_key = os.environ.get(profile.env_var or profile.api_key_ref.removeprefix("env:"), "")
+            api_key = _load_profile_api_key(profile)
             args = _make_args_for_apply(
                 profile,
                 api_key,
@@ -415,6 +411,15 @@ def _make_args_for_apply(profile, api_key, prefs):
     )
     return args
 
+
+
+def _load_profile_api_key(profile) -> str:
+    if profile.api_key_ref == "keychain":
+        from .core import keychain as kc
+        return kc.keychain_get(profile.api_url.rstrip("/")) or ""
+    return os.environ.get(
+        profile.env_var or profile.api_key_ref.removeprefix("env:"), ""
+    )
 
 # ===========================================================================
 # status / apply / profile / doctor / export-config
@@ -524,21 +529,20 @@ def _run_apply(args: argparse.Namespace) -> int:
             prefill: ProviderConfig | None = None
             if prof.profile_exists(prof.get_active_profile_name()):
                 saved = prof.load_profile()
-                prefill = saved.to_provider_config()
-                api_key = ""
+                prefill = saved.to_provider_config(
+                    api_key=_load_profile_api_key(saved)
+                )
                 prompt.header("byop — Custom LLM provider setup")
                 prompt.info(
                     f"Loaded saved profile [bold]{saved.name}[/bold] "
                     f"({saved.provider_name}). Press Enter to keep each field."
                 )
-            else:
-                api_key = ""
 
             collected, prefs = wizard.run_wizard(prefill=prefill)
             provider = collected
+            api_key = provider.api_key
             use_keychain = prefs["use_keychain"] and not args.no_keychain
             use_env = prefs["use_env"] or args.env_key
-
     if not use_keychain and not use_env:
         use_env = True
 
@@ -579,7 +583,7 @@ def _run_apply(args: argparse.Namespace) -> int:
         if cli_flag == "append" and not supports_append(target.name):
             raise _ConflictRejected(
                 f"--conflict append is not supported for {target.display_name} "
-                f"(only py/omp accept multi-provider entries). "
+                f"(only py/omp/opencode accept multi-provider entries). "
                 f"Use --conflict replace or --conflict skip."
             )
         existing_names = target.current_provider_names()
@@ -711,7 +715,7 @@ def _profile_new_interactive() -> int:
     prefill: ProviderConfig | None = None
     if prof.profile_exists(prof.DEFAULT_PROFILE_NAME):
         saved = prof.load_profile(prof.DEFAULT_PROFILE_NAME)
-        prefill = saved.to_provider_config()
+        prefill = saved.to_provider_config(api_key=_load_profile_api_key(saved))
     collected, prefs = wizard.run_wizard(prefill=prefill)
     profile = prof.profile_from_provider(collected, name=name)
     if prefs["use_keychain"]:
@@ -731,7 +735,9 @@ def _profile_edit_interactive() -> int:
         prompt.error("No active profile to edit. Run `byop profile new`.")
         return 2
     saved = prof.load_profile(name)
-    collected, prefs = wizard.run_wizard(prefill=saved.to_provider_config())
+    collected, prefs = wizard.run_wizard(
+        prefill=saved.to_provider_config(api_key=_load_profile_api_key(saved))
+    )
     profile = prof.profile_from_provider(collected, name=name)
     if prefs["use_keychain"]:
         from .core import keychain as kc
@@ -785,7 +791,12 @@ def _run_export(args: argparse.Namespace) -> int:
     """Print the byop-managed slice of every target's settings as JSON."""
     from .core.targets import available_targets
 
-    all_targets = available_targets(settings_path=args.settings)
+    target_kwargs: dict[str, object] = {"settings_path": args.settings}
+    if getattr(args, "omp_profile", None) is not None:
+        target_kwargs["omp_profile"] = args.omp_profile
+    if getattr(args, "omp_models_path", None) is not None:
+        target_kwargs["omp_models_path"] = args.omp_models_path
+    all_targets = available_targets(**target_kwargs)  # type: ignore[arg-type]
     by_name = {t.name: t for t in all_targets}
 
     if args.target:

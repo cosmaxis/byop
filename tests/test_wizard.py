@@ -159,3 +159,30 @@ def test_run_wizard_falls_back_to_secret_prompt_when_paste_missing_key():
     with p_ask, p_secret, p_int, p_confirm:
         provider, _ = wizard.run_wizard()
     assert provider.api_key == "sk-filled-in"
+
+
+def test_run_wizard_saved_prefill_empty_enter_keeps_stored_key():
+    """Pressing Enter on API key during saved-profile edit/apply keeps prefill.api_key."""
+    from byop.core.config import ModelConfig, ProviderConfig
+
+    prefill = ProviderConfig(
+        provider_name="Cosmaxis",
+        api_url="https://api.example.com/v1",
+        api_key="sk-stored-keychain",
+        models=[ModelConfig(name="hy3")],
+    )
+    ask = [
+        "",  # paste prompt
+        "Cosmaxis",
+        "https://api.example.com/v1",
+    ]
+    confirm = [
+        False,  # reconfigure models? -> no
+        True, True, False, False, False, True, False,
+    ]
+    p_ask, p_secret, p_int, p_confirm = _patch_wizard(
+        ask, [], confirm, secret=""
+    )
+    with p_ask, p_secret, p_int, p_confirm:
+        provider, _ = wizard.run_wizard(prefill=prefill)
+    assert provider.api_key == "sk-stored-keychain"

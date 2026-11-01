@@ -84,7 +84,9 @@ def test_cli_dry_run_does_not_persist_profile_or_keychain(monkeypatch, tmp_path)
     assert calls == {"save": 0, "keychain": 0}
 
 
-def test_cli_uses_first_model_for_agent_defaults(monkeypatch):
+def test_cli_uses_first_model_for_agent_defaults(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(kc, "keychain_set", lambda *a, **k: None)
     captured = {}
 
     class FakeTarget:
@@ -109,13 +111,12 @@ def test_cli_uses_first_model_for_agent_defaults(monkeypatch):
 
     assert cli.main([
         "--provider", "P", "--api-url", "https://api.example.com/v1",
-        "--api-key", "sk-x", "--model", "new-model",
+        "--api-key", "sk-12345678", "--model", "new-model",
     ]) == 0
     provider = captured["provider"]
     assert provider.set_default_agent is True
     assert provider.set_inline_assistant is True
     assert provider.models[0].name == "new-model"
-
 def test_cli_non_interactive_requires_provider(monkeypatch, capsys):
     rc = cli.main(["--api-url", "https://api.example.com/v1"])
     assert rc == 2
@@ -198,6 +199,8 @@ def test_cli_runs_only_opencode_target(monkeypatch, tmp_path):
     target.configure = _track  # type: ignore[assignment]
 
     import byop.core.targets as tmod
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path / "byop-cfg"))
+    monkeypatch.setattr(kc, "keychain_set", lambda *a, **k: None)
     monkeypatch.setattr(tmod, "available_targets", lambda settings_path=None: [target])
     monkeypatch.setattr(tmod, "detect_installed", lambda targets: targets)
     monkeypatch.setattr("byop.core.targets.opencode.kc.keychain_has", lambda *a, **k: True)
@@ -403,3 +406,51 @@ def test_cli_session_loop_quits(monkeypatch, tmp_path):
 
     assert rc == 0
     assert call_count["status"] >= 1
+
+
+def test_cli_interactive_apply_without_collision_succeeds_and_stores_key(monkeypatch, tmp_path):
+    """Interactive `byop apply` against an unconfigured target must not hit AssertionError
+    and must persist the wizard-collected key to Keychain."""
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
+    from byop.core.config import ModelConfig, ProviderConfig
+
+    collected = ProviderConfig(
+        provider_name="Cosmaxis",
+        api_url="https://api.example.com/v1",
+        api_key="sk-interactive-123",
+        models=[ModelConfig(name="hy3")],
+    )
+    keychain_calls = []
+    configured = []
+
+    class FakeTarget:
+        name = "zed"
+        display_name = "Zed"
+
+        def is_installed(self):
+            return True
+
+        def install(self, log=print):
+            pass
+
+        def configure(self, provider, **kwargs):
+            configured.append((provider.api_key, kwargs["conflict_action"]))
+
+        def current_provider_names(self):
+            return []  # No collision!
+
+    import byop.core.targets as tmod
+    monkeypatch.setattr(tmod, "available_targets", lambda **kw: [FakeTarget()])
+    monkeypatch.setattr(tmod, "detect_installed", lambda targets: targets)
+    monkeypatch.setattr(
+        cli.wizard,
+        "run_wizard",
+        lambda prefill=None: (collected, {"use_keychain": True, "use_env": False}),
+    )
+    monkeypatch.setattr(cli.prompt, "confirm", lambda *a, **k: True)
+    monkeypatch.setattr(kc, "keychain_set", lambda s, k, *a: keychain_calls.append((s, k)))
+
+    rc = cli.main(["apply", "--skip-install"])
+    assert rc == 0
+    assert keychain_calls == [("https://api.example.com/v1", "sk-interactive-123")]
+    assert configured == [("sk-interactive-123", "replace")]

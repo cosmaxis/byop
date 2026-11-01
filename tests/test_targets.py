@@ -211,13 +211,22 @@ def test_py_configure_merges_existing_providers(tmp_path):
     assert "Other" in data["providers"]
 
 
-def test_py_dry_run_does_not_write(tmp_path):
+def test_py_dry_run_does_not_write_or_leak_secret(tmp_path):
     models = tmp_path / "models.json"
     target = PyTarget(models_path=models)
-    with mock.patch.object(target, "install"):
-        target.configure(_provider(), dry_run=True, log=lambda m: None)
+    logs: list[str] = []
+    with mock.patch.object(target, "install"), \
+         mock.patch("byop.core.targets.py.kc.keychain_has") as khas, \
+         mock.patch("byop.core.targets.py.kc.ensure_key") as ek:
+        target.configure(_provider(), dry_run=True, use_keychain=False, log=logs.append)
+        target.configure(_provider(), dry_run=True, use_keychain=True, log=logs.append)
     assert not models.exists()
-
+    khas.assert_not_called()
+    ek.assert_not_called()
+    joined = "\n".join(logs)
+    assert "sk-example12345678" not in joined
+    assert "[REDACTED]" in joined
+    assert "!security find-internet-password" in joined
 
 def test_py_append_uses_numeric_suffix(tmp_path):
     """On collision, append under ProviderName_2 (skipping already-taken suffixes)."""
