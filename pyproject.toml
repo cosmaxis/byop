@@ -26,6 +26,7 @@ dependencies = [
     "rich>=13.0; sys_platform == 'darwin'",
     "platformdirs>=4.0",
     "tomli-w>=1.0",
+    "tomlkit>=0.15.0",
 ]
 
 [project.optional-dependencies]
