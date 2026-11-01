@@ -188,15 +188,6 @@ def test_cli_runs_only_opencode_target(monkeypatch, tmp_path):
     from byop.core.targets.opencode import OpencodeTarget
 
     target = OpencodeTarget(config_path=tmp_path / "opencode.json")
-    seen = {"calls": 0}
-
-    real_configure = target.configure
-
-    def _track(provider, **kw):
-        seen["calls"] += 1
-        return real_configure(provider, **kw)
-
-    target.configure = _track  # type: ignore[assignment]
 
     import byop.core.targets as tmod
     monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path / "byop-cfg"))
@@ -212,12 +203,12 @@ def test_cli_runs_only_opencode_target(monkeypatch, tmp_path):
         "--api-key", "sk-12345678",
         "--model", "m1",
         "--target", "opencode",
+        "--skip-install",
     ])
 
     assert rc == 0
-    assert seen["calls"] == 1
     data = json.loads((tmp_path / "opencode.json").read_text())
-    assert "P" in data["provider"]
+    assert data["provider"]["P"]["options"]["baseURL"] == "https://api.example.com/v1"
 
 
 def test_cli_conflict_flag_passed_to_configure(monkeypatch, tmp_path):
