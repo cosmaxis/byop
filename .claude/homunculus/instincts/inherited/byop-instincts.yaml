@@ -1,0 +1,37 @@
+# Repository-specific instincts; import only when using continuous-learning-v2.
+
+---
+id: byop-naming-files
+trigger: "when creating Python files or functions in byop"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+---
+
+# Python naming
+
+Use `snake_case` for Python files and functions, consistent with the repository.
+
+---
+id: byop-target-config
+trigger: "when configuring a coding-tool target"
+confidence: 0.8
+domain: architecture
+source: repo-analysis
+---
+
+# Target configuration
+
+Implement target-specific behavior in `byop/core/targets/` and preserve unrelated user settings.
+
+---
+id: byop-test-isolation
+trigger: "when testing target configuration or credentials"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+---
+
+# Isolated tests
+
+Use temporary paths and mock system services; do not write real settings or keychains.
