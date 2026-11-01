@@ -166,6 +166,16 @@ def _add_apply_args(p: argparse.ArgumentParser) -> None:
         help="Explicit OMP models.yml path (overrides --profile).",
     )
     p.add_argument(
+        "--claude-permission-mode",
+        choices=["manual", "auto"],
+        help="Claude only: manual uses human approvals; auto uses safety classification. Omit to preserve.",
+    )
+    p.add_argument(
+        "--claude-auto-mode-model",
+        type=str.strip,
+        help="Claude only: explicit safety classifier model (not the main model). Requires Claude 2.1.302+. Does not enable auto mode.",
+    )
+    p.add_argument(
         "--config-file",
         type=Path,
         help="Path to a JSON file with provider fields (provider_name, "
@@ -449,6 +459,7 @@ def _make_args_for_apply(profile, api_key, prefs):
         provider=profile.provider_name,
         api_url=profile.api_url,
         api_key=api_key,
+        _provider_config=profile.to_provider_config(api_key=api_key),
         model=[m.name for m in profile.models],
         model_name=None,
         model_display=primary.display_name if primary else None,
@@ -555,6 +566,9 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
     # top-level flag. The apply subparser doesn't declare it; default it.
     if getattr(args, "export_config", False):
         return _run_export(args)
+    if getattr(args, "claude_auto_mode_model", None) == "":
+        prompt.error("--claude-auto-mode-model must not be empty.")
+        return 2
 
     # Resolve provider either from --config-file, from CLI flags, from the
     # active profile (in that order), or fall through to the wizard.
@@ -593,7 +607,7 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
                     "--api-key."
                 )
                 return 2
-            provider = _provider_from_args(args)
+            provider = getattr(args, "_provider_config", None) or _provider_from_args(args)
             use_keychain = not args.no_keychain
             use_env = args.env_key
             api_key = provider.api_key
@@ -653,23 +667,9 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
             "Pass --conflict replace|skip|append for non-interactive runs."
         )
         return 2
-    if not args.dry_run:
-        profile = prof.profile_from_provider(
-            provider, name=profile_name,
-            api_key_ref="keychain" if use_keychain else f"env:{provider.env_var_name()}",
-        )
-        if prof.profile_exists(profile_name):
-            prof.save_profile(profile, allow_overwrite=True, api_key=api_key)
-        else:
-            prof.save_profile(profile, api_key=api_key)
-        if profile_name != active_name:
-            prof.set_active_profile_name(profile_name)
-        if use_keychain and api_key:
-            from .core import keychain as kc
-            kc.keychain_set(provider.keychain_server(), api_key)
     cli_flag = args.conflict if args.conflict and args.conflict != "prompt" else None
 
-    def _pick(target) -> str:
+    def _pick(target) -> tuple[str, bool]:
         if cli_flag == "append" and not supports_append(target.name):
             raise _ConflictRejected(
                 f"--conflict append is not supported for {target.display_name} "
@@ -687,11 +687,11 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
             conflict_flag=cli_flag,
         )
         if decided is not None:
-            return decided.value
+            return decided.value, has_collision
         options = ["replace", "skip"]
         if supports_append(target.name):
             options.append("append")
-        return prompt.choose_action(target.display_name, options, default="replace")
+        return prompt.choose_action(target.display_name, options, default="replace"), has_collision
 
     install_approved = True
     if not args.skip_install and not args.dry_run and not non_interactive:
@@ -709,10 +709,14 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
     configured_count = 0
     configured_warp = False
     exported_shell_env = False
+    profile_saved = False
 
     for target in targets:
         try:
-            conflict_action = _pick(target)
+            conflict_action, has_collision = _pick(target)
+            if conflict_action == "skip" and has_collision and target.name in {"claude", "codex"}:
+                prompt.step(target.display_name, "unchanged", status="skip")
+                continue
             was_installed = target.is_installed()
             if not was_installed and not args.skip_install and not args.dry_run:
                 if not install_approved:
@@ -730,6 +734,20 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
             target_provider = provider
             if target.name == "zed" and not non_interactive and conflict_action != "skip":
                 target_provider = wizard.configure_zed_features(provider)
+            if not args.dry_run and not profile_saved:
+                profile = prof.profile_from_provider(
+                    provider, name=profile_name,
+                    api_key_ref="keychain" if use_keychain else f"env:{provider.env_var_name()}",
+                )
+                prof.save_profile(
+                    profile, allow_overwrite=prof.profile_exists(profile_name), api_key=api_key
+                )
+                if profile_name != active_name:
+                    prof.set_active_profile_name(profile_name)
+                if use_keychain and api_key:
+                    from .core import keychain as kc
+                    kc.keychain_set(provider.keychain_server(), api_key)
+                profile_saved = True
 
             if args.dry_run:
                 target.configure(
@@ -1200,6 +1218,9 @@ def _select_targets(
         target_kwargs["omp_profile"] = args.omp_profile
     if getattr(args, "omp_models_path", None) is not None:
         target_kwargs["omp_models_path"] = args.omp_models_path
+    for option in ("claude_permission_mode", "claude_auto_mode_model"):
+        if getattr(args, option, None) is not None:
+            target_kwargs[option] = getattr(args, option)
     all_targets = available_targets(**target_kwargs)
     by_name = {t.name: t for t in all_targets}
 

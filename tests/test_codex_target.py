@@ -140,6 +140,19 @@ def test_codex_build_catalog_has_all_models(tmp_path):
         assert {lvl["effort"] for lvl in m["supported_reasoning_levels"]} >= {"low", "medium", "high", "xhigh"}
 
 
+def test_codex_catalog_retains_configured_minimal_and_disabled_effort(tmp_path):
+    provider = _provider(models=[
+        ModelConfig(name="lite", reasoning_effort="minimal"),
+        ModelConfig(name="plain", reasoning_effort="none"),
+    ])
+    catalog = CodexTarget(tmp_path / "config.toml").build_catalog(provider)
+    lite, plain = catalog["models"]
+    assert lite["default_reasoning_level"] == "minimal"
+    assert "minimal" in {level["effort"] for level in lite["supported_reasoning_levels"]}
+    assert plain["default_reasoning_level"] == "none"
+    assert {level["effort"] for level in plain["supported_reasoning_levels"]} == {"none"}
+
+
 def test_codex_configure_writes_catalog_and_config(tmp_path):
     cfg = tmp_path / "config.toml"
     cat_dir = tmp_path / "catalogs"

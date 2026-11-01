@@ -1,0 +1,6 @@
+interface:
+  display_name: "Byop"
+  short_description: "Repo-specific patterns and workflows for byop"
+  default_prompt: "Use the byop repo skill to follow existing architecture, testing, and workflow conventions."
+policy:
+  allow_implicit_invocation: true

@@ -11,6 +11,13 @@ from byop.core import keychain as kc
 from byop.core import profiles as prof
 
 
+def test_empty_claude_classifier_rejected_before_profile_or_secret_writes(monkeypatch, tmp_path):
+    config = tmp_path / "byop"
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(config))
+    assert cli.main(["apply", "--claude-auto-mode-model", "   "]) == 2
+    assert not config.exists()
+
+
 def test_cli_dry_run_non_interactive(monkeypatch):
     calls = {"install": 0, "configure": 0}
 
@@ -929,8 +936,11 @@ def test_codex_prompts_before_replacing_different_active_provider(monkeypatch, t
     provider = ProviderConfig("Demo", "https://example.com/v1", "secret-123", [ModelConfig("m")])
     prof.save_profile(prof.profile_from_provider(provider, name="Demo"))
     prof.set_active_profile_name("Demo")
-    monkeypatch.setattr(kc, "keychain_set", lambda *args: None)
+    key_writes = []
+    monkeypatch.setattr(kc, "keychain_set", lambda *args: key_writes.append(args))
     actions = []
+    questions = []
+    original_profile = (tmp_path / "profiles" / "Demo.toml").read_bytes()
 
     class Target:
         name = "codex"
@@ -947,8 +957,40 @@ def test_codex_prompts_before_replacing_different_active_provider(monkeypatch, t
 
     monkeypatch.setattr(tmod, "available_targets", lambda **kwargs: [Target()])
     monkeypatch.setattr(cli.prompt, "select_many", lambda *args, **kwargs: [0])
-    monkeypatch.setattr(cli.prompt, "choose_action", lambda *args, **kwargs: "skip")
+    monkeypatch.setattr(cli.prompt, "choose_action", lambda *args, **kwargs: questions.append(args) or "skip")
     args = cli._make_args_for_apply(prof.load_profile("Demo"), "secret-123", {"use_keychain": True})
     args.skip_install = True
     assert cli._run_apply(args, interactive_session=True) == 0
-    assert actions == ["skip"]
+    assert questions
+    assert actions == []
+    assert key_writes == []
+    assert (tmp_path / "profiles" / "Demo.toml").read_bytes() == original_profile
+
+
+def test_saved_profile_preserves_model_limits_when_setting_up_claude(monkeypatch, tmp_path):
+    import byop.core.targets as tmod
+    from byop.core.config import ModelConfig, ProviderConfig
+    from byop.core.targets.claude import ClaudeTarget
+
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path / "byop"))
+    provider = ProviderConfig(
+        "Demo", "https://example.com/v1", "secret-123",
+        [ModelConfig("pro", max_tokens=1000000, max_output_tokens=16000)],
+    )
+    prof.save_profile(prof.profile_from_provider(provider, name="Demo"))
+    prof.set_active_profile_name("Demo")
+    settings = tmp_path / "claude" / "settings.json"
+    target = ClaudeTarget(settings)
+    monkeypatch.setattr(tmod, "available_targets", lambda **kwargs: [target])
+    monkeypatch.setattr(cli.prompt, "select_many", lambda *args, **kwargs: [0])
+    monkeypatch.setattr(kc, "keychain_set", lambda *args: None)
+    monkeypatch.setattr(kc, "keychain_has", lambda *args: True)
+    monkeypatch.setattr(kc, "ensure_key", lambda *args, **kwargs: [])
+    args = cli._make_args_for_apply(prof.load_profile("Demo"), "secret-123", {"use_keychain": True})
+    args.skip_install = True
+
+    assert cli._run_apply(args, interactive_session=True) == 0
+    env = json.loads(settings.read_text())["env"]
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "1000000"
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "16000"
+    assert prof.load_profile("Demo").models[0].max_tokens == 1000000

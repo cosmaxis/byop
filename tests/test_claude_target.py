@@ -90,6 +90,64 @@ def test_build_fragment_shape_with_keychain():
     assert not frag["apiKeyHelper"].startswith("!")
 
 
+def test_custom_gateway_model_limits_refresh_without_replacing_role_mappings(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({
+        "env": {"ANTHROPIC_DEFAULT_SONNET_MODEL": "existing-sonnet"},
+        "permissions": {"allow": ["Read"]},
+    }))
+    target = ClaudeTarget(settings_path=settings)
+    for name, label, context, output in [
+        ("pro", "Gateway Pro", 128000, 16000),
+        ("other-route", None, 256000, 32000),
+    ]:
+        target.configure(_provider(models=[
+            ModelConfig(name=name, display_name=label,
+                        max_tokens=context, max_output_tokens=output),
+            ModelConfig(name="not-selected", max_tokens=1000000),
+        ]), use_keychain=False, log=lambda _: None)
+        data = json.loads(settings.read_text())
+        assert data["model"] == name
+        assert data["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION"] == name
+        assert data["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] == (label or name)
+        assert data["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == str(context)
+        assert data["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == str(output)
+        assert data["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "existing-sonnet"
+        assert data["permissions"] == {"allow": ["Read"]}
+
+
+@pytest.mark.parametrize("mode,classifier,expected_mode,expected_classifier", [
+    (None, None, "auto", "existing-classifier"),
+    ("manual", None, "default", "existing-classifier"),
+    ("auto", " claude-sonnet-4-6 ", "auto", "claude-sonnet-4-6"),
+    (None, "claude-sonnet-4-6", "auto", "claude-sonnet-4-6"),
+])
+def test_permission_configuration_is_explicit_and_preserves_safety_rules(
+    tmp_path, mode, classifier, expected_mode, expected_classifier,
+):
+    settings = tmp_path / "settings.json"
+    rules = {"allow": ["Read"], "deny": ["Bash(rm *)"]}
+    settings.write_text(json.dumps({
+        "permissions": {**rules, "defaultMode": "auto"},
+        "env": {"CLAUDE_CODE_AUTO_MODE_MODEL": "existing-classifier"},
+    }))
+    target = ClaudeTarget(settings, permission_mode=mode, auto_mode_model=classifier)
+    target.configure(_provider(), use_keychain=False, log=lambda _: None)
+    data = json.loads(settings.read_text())
+    assert data["permissions"] == {**rules, "defaultMode": expected_mode}
+    assert data["env"]["CLAUDE_CODE_AUTO_MODE_MODEL"] == expected_classifier
+    assert data["model"] == "hy3"
+
+
+@pytest.mark.parametrize("options", [
+    {"permission_mode": "bypassPermissions"},
+    {"auto_mode_model": "   "},
+])
+def test_invalid_permission_configuration_is_rejected(options):
+    with pytest.raises(ValueError):
+        ClaudeTarget(**options)
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS keychain required")
 def test_configure_first_run_stores_key_before_building_fragment(tmp_path):
     """First run (keychain initially empty) must store key first, then write apiKeyHelper."""
@@ -165,30 +223,20 @@ def test_configure_dry_run_never_leaks_secret_or_touches_keychain(tmp_path):
     assert "[REDACTED]" in joined
 
 
-def test_configure_skip_when_settings_already_match(tmp_path):
-    """Idempotent re-run with conflict_action='skip' and matching settings = no-op."""
+@pytest.mark.parametrize("existing_url", ["https://api.example.com", "https://old.example.com"])
+def test_skip_preserves_matching_provider_settings_and_key(tmp_path, existing_url):
     settings = tmp_path / "settings.json"
     settings.write_text(json.dumps({
-        "apiKeyHelper": "security find-internet-password -s https://api.example.com/v1 -a Bearer -w",
-        "env": {
-            "ANTHROPIC_BASE_URL": "https://api.example.com",
-            "BYOP_PROVIDER": "Cosmaxis",
-        },
-        "model": "hy3",
+        "env": {"ANTHROPIC_BASE_URL": existing_url, "BYOP_PROVIDER": "Cosmaxis"},
+        "permissions": {"defaultMode": "default", "deny": ["Bash(rm *)"]},
+        "model": "old-model",
     }))
-    target = ClaudeTarget(settings_path=settings)
-    writes = {"count": 0}
-    real_write = target._write
-
-    def tracking(data):
-        writes["count"] += 1
-        return real_write(data)
-
-    with mock.patch("byop.core.targets.claude.kc.ensure_key", return_value=["k"]) as ek, \
-         mock.patch.object(target, "_write", tracking):
-        target.configure(_provider(), conflict_action="skip", log=lambda m: None)
-    assert writes["count"] == 0
-    ek.assert_called_once()
+    original = settings.read_bytes()
+    target = ClaudeTarget(settings_path=settings, permission_mode="auto")
+    with mock.patch("byop.core.targets.claude.kc.ensure_key") as ensure_key:
+        target.configure(_provider(), conflict_action="skip", log=lambda _: None)
+    assert settings.read_bytes() == original
+    ensure_key.assert_not_called()
 
 
 def test_current_provider_names_and_export_redaction(tmp_path):

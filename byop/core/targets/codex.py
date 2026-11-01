@@ -26,8 +26,7 @@ from ..settings import atomic_write
 DEFAULT_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
 DEFAULT_CATALOG_DIR = Path.home() / ".codex" / "byop-catalogs"
 
-# All reasoning levels Codex understands for the picker.  ``none``/``minimal``
-# are not user-selectable in the TUI but are accepted by the API.
+# Available picker levels for models whose reasoning support is configured.
 _CATALOG_REASONING_LEVELS = [
     {"effort": "low", "description": "Fast responses with lighter reasoning"},
     {"effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks"},
@@ -53,11 +52,12 @@ def _catalog_entry(model: ModelConfig, priority: int, template: dict) -> dict:
     entry["slug"] = model.name
     entry["display_name"] = model.display_name or model.name
     entry["description"] = f"{entry['display_name']} via byop"
-    default_effort = model.reasoning_effort or "medium"
-    if default_effort not in {level["effort"] for level in _CATALOG_REASONING_LEVELS}:
-        default_effort = "medium"
+    default_effort = model.reasoning_effort or "none"
+    levels = list(_CATALOG_REASONING_LEVELS) if default_effort != "none" else []
+    if default_effort in {"none", "minimal"}:
+        levels.insert(0, {"effort": default_effort, "description": "Configured model default"})
     entry["default_reasoning_level"] = default_effort
-    entry["supported_reasoning_levels"] = list(_CATALOG_REASONING_LEVELS)
+    entry["supported_reasoning_levels"] = levels
     entry["priority"] = priority
     entry["context_window"] = model.max_tokens
     entry["max_context_window"] = model.max_tokens
@@ -289,10 +289,14 @@ class CodexTarget:
                 safe = {key: block[key] for key in ("name", "wire_api", "env_key") if key in block}
                 base_url = block.get("base_url")
                 if isinstance(base_url, str):
-                    parsed = urlsplit(base_url)
-                    safe["base_url"] = urlunsplit(
-                        (parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", "")
-                    )
+                    try:
+                        parsed = urlsplit(base_url)
+                    except ValueError:
+                        pass
+                    else:
+                        safe["base_url"] = urlunsplit(
+                            (parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", "")
+                        )
                 providers[name] = safe
         # Surface catalogue for completeness; not every installation uses it.
         if isinstance(data.get("model_catalog_json"), str):

@@ -1,5 +1,6 @@
 """Tests for keychain/env key injection (subprocess mocked)."""
 
+import subprocess
 import sys
 from pathlib import Path
 from unittest import mock
@@ -78,10 +79,6 @@ def test_keychain_set_raises_on_failure():
             pass
 
 
-def test_env_export_line():
-    assert kc.env_var_export_line("MY_PROV_API_KEY", "sk-1") == \
-        'export MY_PROV_API_KEY="sk-1"'
-
 
 def test_find_env_in_profiles(tmp_path, monkeypatch):
     prof = tmp_path / ".zshrc"
@@ -95,12 +92,9 @@ def test_write_env_appends_once(tmp_path, monkeypatch):
     prof.write_text("# header\n")
     monkeypatch.setattr(kc, "profile_candidates", lambda: [prof])
     kc.write_env_to_profile("PROV_API_KEY", "sk-1", profile=prof)
-    content = prof.read_text()
-    assert content.count('export PROV_API_KEY="sk-1"') == 1
-    # second write to same profile doesn't duplicate
+    first = prof.read_text()
     kc.write_env_to_profile("PROV_API_KEY", "sk-1", profile=prof)
-    assert prof.read_text().count('export PROV_API_KEY="sk-1"') == 1
-
+    assert prof.read_text() == first
 
 
 def test_write_env_replaces_existing_value_on_rotation(tmp_path, monkeypatch):
@@ -110,8 +104,39 @@ def test_write_env_replaces_existing_value_on_rotation(tmp_path, monkeypatch):
     kc.write_env_to_profile("PROV_API_KEY", "sk-new", profile=prof)
     content = prof.read_text()
     assert "sk-old" not in content
-    assert 'export PROV_API_KEY="sk-new"' in content
+    assert subprocess.run(
+        ["/bin/sh", "-c", '. "$1"; printf %s "$PROV_API_KEY"', "sh", str(prof)],
+        capture_output=True, text=True, check=True,
+    ).stdout == "sk-new"
     assert "export OTHER=1" in content
+
+
+def test_shell_export_does_not_execute_key_contents(tmp_path, monkeypatch):
+    prof = tmp_path / ".zshrc"
+    marker = tmp_path / "injected"
+    key = f"sk-'$(printf injected > {marker})'\""
+    monkeypatch.setattr(kc, "profile_candidates", lambda: [prof])
+    kc.write_env_to_profile("PROV_API_KEY", key, profile=prof)
+    result = subprocess.run(
+        ["/bin/sh", "-c", '. "$1"; printf %s "$PROV_API_KEY"', "sh", str(prof)],
+        capture_output=True, text=True, check=True,
+    )
+    assert result.stdout == key
+    assert not marker.exists()
+
+
+def test_newline_key_is_rejected_before_keychain_or_profile_writes():
+    with mock.patch.object(kc, "keychain_set") as store, \
+         mock.patch.object(kc, "write_env_to_profile") as export:
+        try:
+            kc.ensure_key("https://example.com", "bad\nkey", "PROV_API_KEY",
+                          use_keychain=True, use_env=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("newline-containing key must be rejected")
+    store.assert_not_called()
+    export.assert_not_called()
 
 
 def test_ensure_key_keychain_env_writes_no_plaintext(tmp_path, monkeypatch):

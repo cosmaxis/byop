@@ -33,6 +33,8 @@ def available_targets(
     *,
     omp_profile: str | None = None,
     omp_models_path: Path | None = None,
+    claude_permission_mode: str | None = None,
+    claude_auto_mode_model: str | None = None,
 ) -> list[Target]:
     """Instantiate registered targets with optional per-target paths."""
     targets: list[Target] = []
@@ -41,6 +43,11 @@ def available_targets(
             targets.append(cls(settings_path=settings_path))
         elif cls is OmpTarget:
             targets.append(cls(models_path=omp_models_path, profile=omp_profile))
+        elif cls is ClaudeTarget:
+            targets.append(cls(
+                permission_mode=claude_permission_mode,
+                auto_mode_model=claude_auto_mode_model,
+            ))
         else:
             targets.append(cls())
     return targets
