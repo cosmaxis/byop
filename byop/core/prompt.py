@@ -16,6 +16,7 @@ import select
 import shutil
 import sys
 import threading
+import unicodedata
 from collections.abc import Iterator
 
 try:  # pragma: no cover - optional readline support for arrow/backspace editing
@@ -465,29 +466,63 @@ def _format_hint(hint: str) -> str:
     return _style(hint, _DIM)
 
 
-def _use_cursor_menu(
-    options: list[str],
-    *,
-    hints: list[str] | None = None,
-    multiple: bool = False,
-) -> bool:
-    if not _is_tty():
-        return False
+def _display_width(text: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def _terminal_size() -> os.terminal_size:
     try:
         size = os.get_terminal_size(sys.stdout.fileno())
     except OSError:
         size = shutil.get_terminal_size(fallback=(80, 24))
     if not size.columns or not size.lines:
         size = shutil.get_terminal_size(fallback=(80, 24))
-    prefix = 7 if multiple else 6
-    pad = max((len(o) for o in options), default=0)
-    widths = [
-        (pad if hints and hints[i] else len(opt))
-        + (2 + len(hints[i]) if hints and i < len(hints) and hints[i] else 0)
-        + prefix
+    return size
+
+
+def _menu_footer(*, multiple: bool) -> str:
+    return (
+        "↑/↓ move · Space toggle · a all · Enter confirm · Esc cancel"
+        if multiple
+        else "↑/↓ move · Enter to select · Esc cancel"
+    )
+
+
+def _clamp_width(text: str, max_cols: int) -> str:
+    if max_cols <= 1 or _display_width(text) <= max_cols:
+        return text
+    out: list[str] = []
+    used = 0
+    for ch in text:
+        w = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if used + w > max_cols - 1:
+            break
+        out.append(ch)
+        used += w
+    return "".join(out) + "…"
+
+
+def _use_cursor_menu(
+    options: list[str],
+    *,
+    prompt: str = "",
+    hints: list[str] | None = None,
+    multiple: bool = False,
+) -> bool:
+    if not _is_tty():
+        return False
+    size = _terminal_size()
+    pad = max((_display_width(o) for o in options), default=0)
+    option_widths = [
+        5
+        + (pad if hints else _display_width(opt))
+        + (2 + _display_width(hints[i]) if hints and i < len(hints) and hints[i] else 0)
         for i, opt in enumerate(options)
     ]
-    return size.lines >= len(options) + 3 and all(w < size.columns for w in widths)
+    header_width = 3 + _display_width(prompt)
+    footer_width = 3 + _display_width(_menu_footer(multiple=multiple))
+    max_width = max([header_width, footer_width, *option_widths])
+    return size.lines >= len(options) + 3 and max_width < size.columns
 
 
 def _cursor_menu(
@@ -507,14 +542,8 @@ def _cursor_menu(
     index = max(0, min(default_index, len(options) - 1)) if options else 0
     selected: set[int] = set(defaults or ())
     total_lines = len(options) + 2  # header + options + footer
-    pad = max((len(o) for o in options), default=0) if hints else 0
-
-    footer = (
-        "↑/↓ move · Space toggle · a all · Enter confirm · Esc cancel"
-        if multiple
-        else "↑/↓ move · Enter to select · Esc cancel"
-    )
-
+    pad = max((_display_width(o) for o in options), default=0) if hints else 0
+    footer = _menu_footer(multiple=multiple)
     def render_frame(*, move_up: bool) -> None:
         buf: list[str] = []
         if move_up:
@@ -541,11 +570,13 @@ def _cursor_menu(
         sys.stdout.flush()
 
     def collapse(summary: str, *, cancelled: bool = False) -> None:
+        avail = _terminal_size().columns - 1 - (3 + _display_width(prompt) + 3)
+        clipped = _clamp_width(summary, avail) if avail > 1 else summary
         buf = [f"\033[{total_lines}A"]
         buf.extend("\r\033[2K\n" for _ in range(total_lines))
         buf.append(f"\033[{total_lines}A")
         icon = _style("■", _YELLOW) if cancelled else _style("◇", _GREEN)
-        buf.append(f"\r\033[2K{icon}  {prompt} {_style('·', _DIM)} {_style(summary, _DIM)}\n")
+        buf.append(f"\r\033[2K{icon}  {prompt} {_style('·', _DIM)} {_style(clipped, _DIM)}\n")
         sys.stdout.write("".join(buf))
         sys.stdout.flush()
 
@@ -608,7 +639,7 @@ def choose(
     *,
     hints: list[str] | None = None,
 ) -> str:
-    if _use_cursor_menu(options, hints=hints):
+    if _use_cursor_menu(options, prompt=prompt, hints=hints):
         return options[_cursor_menu(prompt, options, default_index, hints=hints, multiple=False)[0]]
 
     print(f"› {prompt}")
@@ -634,7 +665,7 @@ def select_many(
     """Select zero or more options, returning their indexes in display order."""
     if not options:
         return []
-    if _use_cursor_menu(options, hints=hints, multiple=True):
+    if _use_cursor_menu(options, prompt=prompt, hints=hints, multiple=True):
         return _cursor_menu(
             prompt, options, 0, hints=hints, defaults=defaults, multiple=True
         )
@@ -663,8 +694,9 @@ def select_many(
 def choose_action(target_label: str, options: list[str], default: str = "replace") -> str:
     """Prompt for a conflict-resolution action on ``target_label``."""
     default_idx = options.index(default) if default in options else 0
-    if _use_cursor_menu(options):
-        return choose(f"{target_label} already configured", options, default_index=default_idx)
+    title = f"{target_label} already configured"
+    if _use_cursor_menu(options, prompt=title):
+        return choose(title, options, default_index=default_idx)
     raw = _strip_escape_chars(
         input(f"  {target_label} [{'/'.join(options)}] ({default}): ")
     ).strip().lower()

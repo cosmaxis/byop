@@ -189,6 +189,59 @@ def test_narrow_terminal_uses_complete_plain_checklist():
         os.close(slave)
 
 
+def test_40_column_terminal_with_short_options_falls_back_when_footer_would_wrap():
+    """Short option labels ('Zed', 'Warp') at 40 cols must still fall back because the footer is >40 cols."""
+    import fcntl
+    import os
+    import pty
+    import select
+    import struct
+    import subprocess
+    import termios
+    import time
+
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 40, 0, 0))
+    env = {**os.environ, "TERM": "xterm-256color"}
+    env.pop("BYOP_PLAIN", None)
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            'from byop.core.prompt import select_many; print("selected=" + str(select_many("Tools", ["Zed", "Warp"])))',
+        ],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env=env,
+    )
+    output = b""
+    try:
+        deadline = time.monotonic() + 10
+        while b"): " not in output and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.2)[0]:
+                output += os.read(master, 4096)
+        assert b"1. Zed" in output
+        assert b"2. Warp" in output
+        assert b"\x1b[" not in output
+        os.write(master, b"1,2\n")
+        deadline = time.monotonic() + 10
+        while child.poll() is None and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.2)[0]:
+                output += os.read(master, 4096)
+        child.wait(timeout=1)
+        while select.select([master], [], [], 0)[0]:
+            output += os.read(master, 4096)
+        assert child.returncode == 0
+        assert b"selected=[0, 1]" in output
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+        os.close(master)
+        os.close(slave)
+
+
 def test_checklist_select_all_hotkey():
     import os
     import pty
