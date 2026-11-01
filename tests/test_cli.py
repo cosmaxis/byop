@@ -926,3 +926,32 @@ def test_cancelled_checklist_does_not_change_credentials_or_profile(monkeypatch,
     assert "Cancelled." in capsys.readouterr().out
     assert (tmp_path / "profiles" / "Demo.toml").read_bytes() == before
     assert writes == []
+
+
+def test_saved_profile_preserves_model_limits_when_setting_up_claude(monkeypatch, tmp_path):
+    import byop.core.targets as tmod
+    from byop.core.config import ModelConfig, ProviderConfig
+    from byop.core.targets.claude import ClaudeTarget
+
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path / "byop"))
+    provider = ProviderConfig(
+        "Demo", "https://example.com/v1", "secret-123",
+        [ModelConfig("pro", max_tokens=1000000, max_output_tokens=16000)],
+    )
+    prof.save_profile(prof.profile_from_provider(provider, name="Demo"))
+    prof.set_active_profile_name("Demo")
+    settings = tmp_path / "claude" / "settings.json"
+    target = ClaudeTarget(settings)
+    monkeypatch.setattr(tmod, "available_targets", lambda **kwargs: [target])
+    monkeypatch.setattr(cli.prompt, "select_many", lambda *args, **kwargs: [0])
+    monkeypatch.setattr(kc, "keychain_set", lambda *args: None)
+    monkeypatch.setattr(kc, "keychain_has", lambda *args: True)
+    monkeypatch.setattr(kc, "ensure_key", lambda *args, **kwargs: [])
+    args = cli._make_args_for_apply(prof.load_profile("Demo"), "secret-123", {"use_keychain": True})
+    args.skip_install = True
+
+    assert cli._run_apply(args, interactive_session=True) == 0
+    env = json.loads(settings.read_text())["env"]
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "1000000"
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "16000"
+    assert prof.load_profile("Demo").models[0].max_tokens == 1000000

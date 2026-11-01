@@ -196,26 +196,8 @@ class ClaudeTarget:
         target_base_url = anthropic_base_url(provider.normalized_api_url())
         if conflict_action == "skip":
             existing = self._load()
-            raw_env = existing.get("env")
-            existing_env = raw_env if isinstance(raw_env, dict) else {}
-            same = (
-                self._extract_provider_name(existing) == provider.provider_name
-                and existing_env.get("ANTHROPIC_BASE_URL") == target_base_url
-            )
-            if same:
-                if use_keychain or use_env:
-                    kc.ensure_key(
-                        server=provider.keychain_server(),
-                        api_key=provider.api_key,
-                        env_var=provider.env_var_name(),
-                        log=log,
-                        use_keychain=use_keychain,
-                        use_env=use_env,
-                    )
-                log(
-                    f"Skip: Claude Code already has {provider.provider_name} "
-                    f"with the same ANTHROPIC_BASE_URL."
-                )
+            if self._extract_provider_name(existing) == provider.provider_name:
+                log(f"Skip: Claude Code already has {provider.provider_name}; settings unchanged.")
                 return
 
         # Store key BEFORE build_fragment so Keychain detection sees fresh entries.

@@ -223,30 +223,20 @@ def test_configure_dry_run_never_leaks_secret_or_touches_keychain(tmp_path):
     assert "[REDACTED]" in joined
 
 
-def test_configure_skip_when_settings_already_match(tmp_path):
-    """Idempotent re-run with conflict_action='skip' and matching settings = no-op."""
+@pytest.mark.parametrize("existing_url", ["https://api.example.com", "https://old.example.com"])
+def test_skip_preserves_matching_provider_settings_and_key(tmp_path, existing_url):
     settings = tmp_path / "settings.json"
     settings.write_text(json.dumps({
-        "apiKeyHelper": "security find-internet-password -s https://api.example.com/v1 -a Bearer -w",
-        "env": {
-            "ANTHROPIC_BASE_URL": "https://api.example.com",
-            "BYOP_PROVIDER": "Cosmaxis",
-        },
-        "model": "hy3",
+        "env": {"ANTHROPIC_BASE_URL": existing_url, "BYOP_PROVIDER": "Cosmaxis"},
+        "permissions": {"defaultMode": "default", "deny": ["Bash(rm *)"]},
+        "model": "old-model",
     }))
-    target = ClaudeTarget(settings_path=settings)
-    writes = {"count": 0}
-    real_write = target._write
-
-    def tracking(data):
-        writes["count"] += 1
-        return real_write(data)
-
-    with mock.patch("byop.core.targets.claude.kc.ensure_key", return_value=["k"]) as ek, \
-         mock.patch.object(target, "_write", tracking):
-        target.configure(_provider(), conflict_action="skip", log=lambda m: None)
-    assert writes["count"] == 0
-    ek.assert_called_once()
+    original = settings.read_bytes()
+    target = ClaudeTarget(settings_path=settings, permission_mode="auto")
+    with mock.patch("byop.core.targets.claude.kc.ensure_key") as ensure_key:
+        target.configure(_provider(), conflict_action="skip", log=lambda _: None)
+    assert settings.read_bytes() == original
+    ensure_key.assert_not_called()
 
 
 def test_current_provider_names_and_export_redaction(tmp_path):

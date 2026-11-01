@@ -459,6 +459,7 @@ def _make_args_for_apply(profile, api_key, prefs):
         provider=profile.provider_name,
         api_url=profile.api_url,
         api_key=api_key,
+        _provider_config=profile.to_provider_config(api_key=api_key),
         model=[m.name for m in profile.models],
         model_name=None,
         model_display=primary.display_name if primary else None,
@@ -606,7 +607,7 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
                     "--api-key."
                 )
                 return 2
-            provider = _provider_from_args(args)
+            provider = getattr(args, "_provider_config", None) or _provider_from_args(args)
             use_keychain = not args.no_keychain
             use_env = args.env_key
             api_key = provider.api_key
