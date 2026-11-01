@@ -1,6 +1,11 @@
 #!/bin/bash
 set -e
 
+# Read the complete script before running child processes. With curl | sh,
+# children otherwise share the script's stdin and can consume the remaining
+# commands before the shell reaches them.
+{
+
 # =============================================================================
 # byop installer — Bring Your Own Provider
 # Wire a custom OpenAI-compatible LLM provider into Zed, py.dev, and more.
@@ -66,7 +71,7 @@ printf "%b\n" "${BOLD}byop${NC} ${DIM}— Bring Your Own Provider${NC}"
 printf "%b\n" "${DIM}Custom OpenAI-compatible LLM provider setup for your AI coding tools${NC}"
 printf "\n"
 
-printf "%b\n" "${DIM}Checking prerequisites${NC}"
+printf "%b\n" "${DIM}[1/4] Checking prerequisites${NC}"
 # curl is part of macOS and is also needed to download this installer.
 command -v curl >/dev/null 2>&1 || die "curl is unavailable. Restore the macOS system tools and retry."
 
@@ -118,6 +123,7 @@ if [ -z "$PY" ]; then
     fi
 fi
 info "${CHECK} Python: ${BOLD}$("$PY" --version 2>&1)${NC}"
+printf "%b\n" "${DIM}[2/4] Checking Git${NC}"
 
 # Git is needed by pipx to install from the Git repository. On macOS,
 # /usr/bin/git can exist as an unusable Command Line Tools placeholder.
@@ -132,6 +138,7 @@ if ! git --version >/dev/null 2>&1; then
 fi
 info "${CHECK} Git is available."
 
+printf "%b\n" "${DIM}[3/4] Checking pipx${NC}"
 # --- pipx (isolated install, including byop's Python dependencies) --------
 if ! command -v pipx >/dev/null 2>&1; then
     ensure_brew
@@ -156,7 +163,7 @@ else
 fi
 
 printf "\n"
-printf "%b\n" "${DIM}Installing byop ${TAG}${NC}"
+printf "%b\n" "${DIM}[4/4] Installing byop ${TAG}${NC}"
 
 if pipx install --force --python "$PY" "$SOURCE"; then
     info "${CHECK} Installed with pipx and its Python dependencies"
@@ -169,15 +176,14 @@ printf "\n"
 if command -v byop >/dev/null 2>&1; then
     printf "%b\n" "${GREEN}${BOLD}Installation complete${NC} ${DIM}($(byop --version 2>/dev/null))${NC}"
     printf "\n"
-    printf "%b\n" "${DIM}Get started${NC}"
-    printf "  %b\n" "${CYAN}byop${NC}            Run the interactive setup wizard"
-    printf "  %b\n" "${CYAN}byop --help${NC}     Show all options"
+    printf "%b\n" "${DIM}Next: run ${CYAN}byop${NC} to configure your provider and choose your tools."
 else
+    BYOP_BIN="$(pipx environment --value PIPX_BIN_DIR 2>/dev/null || true)"
+    BYOP_BIN="${BYOP_BIN:-${PIPX_BIN_DIR:-$HOME/.local/bin}}"
     printf "%b\n" "${GREEN}${BOLD}Installation complete${NC}"
     printf "\n"
-    printf "%b\n" "${WARN} The ${BOLD}byop${NC} command isn't on your PATH yet."
-    printf "%b\n" "  Run: ${CYAN}pipx ensurepath${NC} then open a new terminal."
+    printf "%b\n" "${DIM}Next: run ${CYAN}\"$BYOP_BIN/byop\"${NC} to configure your provider and choose your tools."
+    printf "%b\n" "${DIM}For the shorter ${CYAN}byop${NC} command, run ${CYAN}pipx ensurepath${NC} and open a new terminal.${NC}"
 fi
 printf "\n"
-printf "%b\n" "${DIM}Documentation${NC}  https://github.com/${REPO}"
-printf "\n"
+}

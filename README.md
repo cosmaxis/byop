@@ -81,6 +81,11 @@ pipx. If Homebrew is missing, it installs that first and may request your
 administrator password. Network access and the macOS system tools (including
 `curl`) are required.
 
+When installation finishes, run `byop` and follow the prompts to enter your
+provider and select tools. If `byop` is not on your PATH yet, use the full
+command printed by the installer, or run `pipx ensurepath` and open a new
+terminal.
+
 > Prefer to read before you run? Inspect the script first:
 > `curl -sfS https://byop.cosmaxis.com/install`
 

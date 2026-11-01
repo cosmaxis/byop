@@ -211,3 +211,52 @@ def test_installer_reports_package_install_failure(tmp_path):
     assert result.returncode != 0
     assert "dependency download failed" in result.stderr
     assert "Installation complete" not in result.stdout
+
+
+def test_piped_installer_continues_after_children_read_stdin(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    prefix = tmp_path / "python"
+    (prefix / "bin").mkdir(parents=True)
+    log = tmp_path / "calls"
+    executable(bin_dir / "uname", "echo Darwin\n")
+    executable(bin_dir / "python3", "exit 1\n")
+    executable(prefix / "bin" / "python3.12", 'echo "Python 3.12"\n')
+    executable(bin_dir / "git", "exit 0\n")
+    executable(
+        bin_dir / "brew",
+        'echo "brew $*" >> "$CALLS"\n'
+        'if [ "$1" = install ]; then /bin/cat >/dev/null; fi\n'
+        'if [ "$1" = --prefix ]; then echo "$PY_PREFIX"; fi\n',
+    )
+    executable(
+        bin_dir / "pipx",
+        'echo "pipx $*" >> "$CALLS"\n'
+        'if [ "$1" = install ]; then /bin/cat >/dev/null; fi\n'
+        'if [ "$1" = environment ]; then echo "$BIN_LOCATION"; fi\n',
+    )
+    executable(bin_dir / "curl", 'echo \'{"tag_name":"v2.0.0"}\'\n')
+    for name in ("grep", "head", "sed"):
+        (bin_dir / name).symlink_to(Path("/usr/bin") / name)
+
+    result = subprocess.run(
+        ["/bin/sh"],
+        input=INSTALLER.read_text(encoding="utf-8"),
+        env={
+            "PATH": str(bin_dir),
+            "HOME": str(tmp_path),
+            "CALLS": str(log),
+            "PY_PREFIX": str(prefix),
+            "BIN_LOCATION": str(tmp_path / "custom bin"),
+        },
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=15,
+    )
+    calls = log.read_text()
+    assert "brew install python@3.12" in calls
+    assert f"pipx install --force --python {prefix}/bin/python3.12 " in calls
+    assert "[4/4] Installing byop" in result.stdout
+    assert "Installation complete" in result.stdout
+    assert f'"{tmp_path}/custom bin/byop"' in result.stdout
