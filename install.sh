@@ -1,13 +1,18 @@
 #!/bin/bash
 set -e
 
+# Read the complete script before running child processes. With curl | sh,
+# children otherwise share the script's stdin and can consume the remaining
+# commands before the shell reaches them.
+{
+
 # =============================================================================
 # byop installer — Bring Your Own Provider
 # Wire a custom OpenAI-compatible LLM provider into Zed, py.dev, and more.
-# https://github.com/thinhngotony/byop
+# https://github.com/Cosmaxis/byop
 # =============================================================================
 
-REPO="thinhngotony/byop"
+REPO="Cosmaxis/byop"
 BYOP_REPO_URL="${BYOP_REPO_URL:-https://github.com/${REPO}.git}"
 
 # Colors
@@ -42,7 +47,7 @@ find_python() {
     for cand in python3.13 python3.12 python3.11 python3; do
         if command -v "$cand" >/dev/null 2>&1; then
             if "$cand" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3, 11) else 1)' 2>/dev/null; then
-                echo "$cand"
+                command -v "$cand"
                 return 0
             fi
         fi
@@ -66,39 +71,85 @@ printf "%b\n" "${BOLD}byop${NC} ${DIM}— Bring Your Own Provider${NC}"
 printf "%b\n" "${DIM}Custom OpenAI-compatible LLM provider setup for your AI coding tools${NC}"
 printf "\n"
 
-printf "%b\n" "${DIM}Checking prerequisites${NC}"
+printf "%b\n" "${DIM}[1/4] Checking prerequisites${NC}"
+# curl is part of macOS and is also needed to download this installer.
+command -v curl >/dev/null 2>&1 || die "curl is unavailable. Restore the macOS system tools and retry."
 
-# --- Homebrew (used to install python/pipx if missing) ---------------------
-HAS_BREW=false
-command -v brew >/dev/null 2>&1 && HAS_BREW=true
 
-# --- Python ----------------------------------------------------------------
+# --- Homebrew and Python ----------------------------------------------------
+# Homebrew may be installed but not yet on PATH in a non-login shell.
+for brew_bin in /opt/homebrew/bin /usr/local/bin; do
+    if [ -x "$brew_bin/brew" ] && ! command -v brew >/dev/null 2>&1; then
+        PATH="$brew_bin:$PATH"
+        export PATH
+    fi
+done
+
+ensure_brew() {
+    if command -v brew >/dev/null 2>&1; then
+        return
+    fi
+    info "${WARN} Homebrew not found; installing it for missing prerequisites."
+    info "Homebrew may request your macOS administrator password."
+    BREW_INSTALLER="$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+        || die "Could not download the Homebrew installer. Check your network connection."
+    if ( : </dev/tty ) 2>/dev/null; then
+        /bin/bash -c "$BREW_INSTALLER" </dev/tty \
+            || die "Homebrew installation failed. See the errors above."
+    else
+        NONINTERACTIVE=1 /bin/bash -c "$BREW_INSTALLER" \
+            || die "Homebrew installation failed. Retry in an interactive terminal with administrator access."
+    fi
+    for brew_bin in /opt/homebrew/bin /usr/local/bin; do
+        if [ -x "$brew_bin/brew" ]; then
+            PATH="$brew_bin:$PATH"
+            export PATH
+            break
+        fi
+    done
+    command -v brew >/dev/null 2>&1 || die "Homebrew was installed but could not be found on PATH."
+}
+
 PY="$(find_python || true)"
 if [ -z "$PY" ]; then
-    if [ "$HAS_BREW" = true ]; then
-        info "${WARN} Python 3.11+ not found; installing via Homebrew..."
-        brew install python@3.12 >/dev/null 2>&1 || die "Failed to install Python via Homebrew."
-        PY="$(find_python || true)"
+    ensure_brew
+    info "${WARN} Python 3.11+ not found; installing Python via Homebrew..."
+    brew install python@3.12 || die "Failed to install Python via Homebrew. See the errors above."
+    PY="$(find_python || true)"
+    if [ -z "$PY" ]; then
+        PY="$(brew --prefix python@3.12)/bin/python3.12"
+        [ -x "$PY" ] && "$PY" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3, 11) else 1)' \
+            || die "Python was installed but a usable Python 3.11+ interpreter could not be found."
     fi
 fi
-[ -n "$PY" ] || die "Python 3.11+ is required. Install it (e.g. 'brew install python') and re-run."
 info "${CHECK} Python: ${BOLD}$("$PY" --version 2>&1)${NC}"
+printf "%b\n" "${DIM}[2/4] Checking Git${NC}"
 
-# --- pipx (preferred: isolated install) ------------------------------------
-INSTALLER=""
-if command -v pipx >/dev/null 2>&1; then
-    INSTALLER="pipx"
-elif [ "$HAS_BREW" = true ]; then
-    info "${WARN} pipx not found; installing via Homebrew..."
-    if brew install pipx >/dev/null 2>&1; then
-        pipx ensurepath >/dev/null 2>&1 || true
-        INSTALLER="pipx"
-    fi
+# Git is needed by pipx to install from the Git repository. On macOS,
+# /usr/bin/git can exist as an unusable Command Line Tools placeholder.
+if ! git --version >/dev/null 2>&1; then
+    ensure_brew
+    info "${WARN} Git not found; installing it via Homebrew..."
+    brew install git || die "Failed to install Git via Homebrew. See the errors above."
+    PATH="$(brew --prefix)/bin:$PATH"
+    export PATH
+    hash -r
+    git --version >/dev/null 2>&1 || die "Git was installed but could not be run."
 fi
-if [ -z "$INSTALLER" ]; then
-    info "${WARN} pipx unavailable; installing byop into your user site with pip."
-    INSTALLER="pip"
+info "${CHECK} Git is available."
+
+printf "%b\n" "${DIM}[3/4] Checking pipx${NC}"
+# --- pipx (isolated install, including byop's Python dependencies) --------
+if ! command -v pipx >/dev/null 2>&1; then
+    ensure_brew
+    info "${WARN} pipx not found; installing it via Homebrew..."
+    brew install pipx || die "Failed to install pipx via Homebrew. See the errors above."
+    PATH="$(brew --prefix)/bin:$PATH"
+    export PATH
+    hash -r
+    command -v pipx >/dev/null 2>&1 || die "pipx was installed but could not be found on PATH."
 fi
+pipx ensurepath >/dev/null 2>&1 || true
 
 # --- Determine version to install ------------------------------------------
 TAG="$(latest_tag)"
@@ -112,20 +163,12 @@ else
 fi
 
 printf "\n"
-printf "%b\n" "${DIM}Installing byop ${TAG}${NC}"
+printf "%b\n" "${DIM}[4/4] Installing byop ${TAG}${NC}"
 
-if [ "$INSTALLER" = "pipx" ]; then
-    if pipx install --force "$SOURCE" >/dev/null 2>&1; then
-        info "${CHECK} Installed with pipx"
-    else
-        die "pipx install failed. Try: pipx install \"$SOURCE\""
-    fi
+if pipx install --force --python "$PY" "$SOURCE"; then
+    info "${CHECK} Installed with pipx and its Python dependencies"
 else
-    if "$PY" -m pip install --user --upgrade "$SOURCE" >/dev/null 2>&1; then
-        info "${CHECK} Installed with pip (--user)"
-    else
-        die "pip install failed. Try: $PY -m pip install --user \"$SOURCE\""
-    fi
+    die "pipx install failed. Check the errors above and retry: pipx install --python \"$PY\" \"$SOURCE\""
 fi
 
 # --- Verify ----------------------------------------------------------------
@@ -133,20 +176,14 @@ printf "\n"
 if command -v byop >/dev/null 2>&1; then
     printf "%b\n" "${GREEN}${BOLD}Installation complete${NC} ${DIM}($(byop --version 2>/dev/null))${NC}"
     printf "\n"
-    printf "%b\n" "${DIM}Get started${NC}"
-    printf "  %b\n" "${CYAN}byop${NC}            Run the interactive setup wizard"
-    printf "  %b\n" "${CYAN}byop --help${NC}     Show all options"
+    printf "%b\n" "${DIM}Next: run ${CYAN}byop${NC} to configure your provider and choose your tools."
 else
+    BYOP_BIN="$(pipx environment --value PIPX_BIN_DIR 2>/dev/null || true)"
+    BYOP_BIN="${BYOP_BIN:-${PIPX_BIN_DIR:-$HOME/.local/bin}}"
     printf "%b\n" "${GREEN}${BOLD}Installation complete${NC}"
     printf "\n"
-    printf "%b\n" "${WARN} The ${BOLD}byop${NC} command isn't on your PATH yet."
-    if [ "$INSTALLER" = "pipx" ]; then
-        printf "%b\n" "  Run: ${CYAN}pipx ensurepath${NC} then open a new terminal."
-    else
-        printf "%b\n" "  Add your Python user bin to PATH, e.g.:"
-        printf "%b\n" "    ${CYAN}export PATH=\"\$($PY -m site --user-base)/bin:\$PATH\"${NC}"
-    fi
+    printf "%b\n" "${DIM}Next: run ${CYAN}\"$BYOP_BIN/byop\"${NC} to configure your provider and choose your tools."
+    printf "%b\n" "${DIM}For the shorter ${CYAN}byop${NC} command, run ${CYAN}pipx ensurepath${NC} and open a new terminal.${NC}"
 fi
 printf "\n"
-printf "%b\n" "${DIM}Documentation${NC}  https://github.com/${REPO}"
-printf "\n"
+}

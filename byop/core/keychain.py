@@ -49,23 +49,31 @@ def keychain_has(server: str, account: str = "Bearer") -> bool:
     )
 
 
-def security_command_ref(server: str, account: str = "Bearer") -> str:
-    """Build the ``!security find-internet-password ...`` shell-out string.
+def security_command(server: str, account: str = "Bearer") -> str:
+    """Build the ``security find-internet-password ...`` command string.
 
-    Targets embed this verbatim in their settings JSON for the ``apiKey``
-    field, so the editor reads the secret at request time without ever
-    persisting plaintext.
-
-    The ``server`` and ``account`` values are shell-quoted with
-    :func:`shlex.quote` to prevent injection when the editor interprets
-    the ``!command`` reference.
+    Shell-quotes ``server`` and ``account`` via :func:`shlex.quote` so callers
+    (such as Claude Code's ``apiKeyHelper`` or ``!command`` wrappers) can run
+    it safely through a shell without persisting plaintext secrets.
     """
     return (
-        f"!security find-internet-password"
+        f"security find-internet-password"
         f" -s {shlex.quote(server)}"
         f" -a {shlex.quote(account)}"
         f" -w"
     )
+
+
+def security_command_ref(server: str, account: str = "Bearer") -> str:
+    """Build the ``!security find-internet-password ...`` shell-out string."""
+    return f"!{security_command(server, account)}"
+
+
+def keychain_env_export_line(
+    env_var: str, server: str, account: str = "Bearer"
+) -> str:
+    """Export ``env_var`` dynamically from Keychain without plaintext on disk."""
+    return f'export {env_var}="$({security_command(server, account)} 2>/dev/null)"'
 
 
 def keychain_get(server: str, account: str = "Bearer") -> str | None:
@@ -149,18 +157,29 @@ def find_env_in_profiles(env_var: str) -> Path | None:
 
 
 def write_env_to_profile(
-    env_var: str, api_key: str, profile: Path | None = None
+    env_var: str,
+    api_key: str,
+    profile: Path | None = None,
+    *,
+    raw_line: str | None = None,
 ) -> Path:
-    """Append the env var export to a shell profile (default: ``~/.zshrc``)."""
+    """Write or update ``env_var`` export in a shell profile (default ``~/.zshrc``)."""
 
     target = profile or (Path.home() / ".zshrc")
-    line = env_var_export_line(env_var, api_key)
+    line = raw_line or env_var_export_line(env_var, api_key)
+    marker = f"export {env_var}="
     existed = find_env_in_profiles(env_var)
-    if existed == target:
-        # Already present in the chosen profile; do not duplicate.
+    if existed == target and target.exists():
         existing = target.read_text(encoding="utf-8", errors="ignore")
         if line in existing:
             return target
+        updated_lines = [
+            line if raw.lstrip().startswith(marker) else raw
+            for raw in existing.splitlines()
+        ]
+        target.write_text("\n".join(updated_lines) + "\n", encoding="utf-8")
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a", encoding="utf-8") as fh:
         fh.write("\n# Added by byop for custom LLM provider\n")
         fh.write(line + "\n")
@@ -174,10 +193,15 @@ def ensure_key(
     log: Callable[[str], None] = print,
     use_keychain: bool = True,
     use_env: bool = False,
+    *,
+    keychain_env: bool = False,
 ) -> list[str]:
     """Store the API key via keychain and/or env var.
 
-    Returns a list of human-readable notes about what was done.
+    When ``use_keychain`` and ``keychain_env`` are both True (and ``use_env``
+    is False), exports ``env_var`` in the shell profile via a dynamic
+    ``$(security find-internet-password ...)`` subshell so tools that only read
+    environment variables work without storing plaintext secrets on disk.
     """
 
     notes: list[str] = []
@@ -189,6 +213,14 @@ def ensure_key(
         path = write_env_to_profile(env_var, api_key)
         log(f"Exported {env_var} in {path}.")
         notes.append(f"env:{path}")
+    elif use_keychain and keychain_env:
+        path = write_env_to_profile(
+            env_var,
+            "",
+            raw_line=keychain_env_export_line(env_var, server),
+        )
+        log(f"Exported keychain-backed {env_var} in {path}.")
+        notes.append(f"keychain_env:{path}")
     if not notes:
         raise RuntimeError("No key storage method selected.")
     return notes

@@ -339,7 +339,7 @@ def _emit_models_yaml(data: dict) -> str:
 
 class OmpTarget(PyTarget):
     name = "omp"
-    display_name = "Oh My Pi (omp)"
+    display_name = "Oh My Pi"
 
     def __init__(
         self,
@@ -351,6 +351,9 @@ class OmpTarget(PyTarget):
         if models_path is None and profile is not None:
             models_path = profile_models_path(profile, config_root)
         super().__init__(models_path=models_path or DEFAULT_MODELS_PATH)
+
+    def _format_dry_run(self, fragment: dict) -> str:
+        return _emit_models_yaml(fragment).rstrip("\n")
 
     # omp reads ~/.omp/agent/models.yml (NOT models.json). Override _load /
     # _write to round-trip the same fragment through YAML instead of JSON.
@@ -392,10 +395,7 @@ class OmpTarget(PyTarget):
 
     # ------------------------------------------------------------------
     def is_installed(self) -> bool:
-        return (
-            self.models_path.parent.parent.exists()
-            or shutil.which("omp") is not None
-        )
+        return shutil.which("omp") is not None
 
     def install(self, log: Callable[[str], None] = print) -> None:
         if shutil.which("brew") is not None:

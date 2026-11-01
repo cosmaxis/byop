@@ -17,7 +17,7 @@ The main flow is:
 
 Targets implement the protocol in `byop/core/targets/base.py` and are registered in `byop/core/targets/registry.py`. Add a target by adding one module under `byop/core/targets/` and registering it in `ALL_TARGETS`; do not create a parallel abstraction.
 
-Important safety behavior: settings merges are non-destructive and intended to be idempotent. Warp is read-only/manual-paste because its endpoint and secure-storage schemas are undocumented; it validates public HTTPS endpoints and redacts keys.
+Important safety behavior: settings merges are non-destructive and intended to be idempotent. Warp checks the installed endpoint schema before writing comment-preserving TOML, stores endpoint keys through native macOS Security.framework calls, and falls back to redacted manual instructions on incompatible versions or without Keychain. Preserve other endpoints, stable model IDs, permissions, and existing Keychain access controls. Require a full Warp restart after credential changes; never quit the application automatically.
 
 ## Key Directories
 

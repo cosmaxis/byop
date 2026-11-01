@@ -2,7 +2,7 @@ export default {
   async fetch(request) {
     const url = new URL(request.url);
     const path = url.pathname;
-    const REPO = "thinhngotony/byop";
+    const REPO = "Cosmaxis/byop";
 
     // Resolve the latest release tag so installs are pinned to immutable
     // content (no stale CDN cache); fall back to the default branch.
@@ -39,7 +39,7 @@ export default {
 Wire a custom OpenAI-compatible LLM provider into Zed, py.dev, and more.
 
 Install (macOS):
-  curl -sfS https://byop.hyberorbit.com/install | sh
+  curl -sfS https://byop.cosmaxis.com/install | sh
 
 Then run:
   byop

@@ -1,4 +1,4 @@
-"""Claude Code target: wires a provider into ~/.claude/settings.json."""
+"""Claude Code target: wires an Anthropic-compatible gateway into ~/.claude/settings.json."""
 
 from __future__ import annotations
 
@@ -7,15 +7,34 @@ import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 from .. import keychain as kc
 from ..config import ProviderConfig
 
 DEFAULT_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 
+# Legacy keys written by older byop versions that Claude Code ignores.
+_LEGACY_KEYS = ("provider", "apiBaseUrl", "apiKey", "models")
+
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+
+def anthropic_base_url(api_url: str) -> str:
+    """Normalize a provider URL for ``ANTHROPIC_BASE_URL``.
+
+    Claude Code posts to ``$ANTHROPIC_BASE_URL/v1/messages``, so a trailing
+    ``/v1`` segment common to OpenAI-compatible URLs must be stripped to avoid
+    hitting ``/v1/v1/messages``.
+    """
+    normalized = api_url.rstrip("/")
+    parsed = urlparse(normalized)
+    path = parsed.path.rstrip("/")
+    if path == "/v1" or path.endswith("/v1"):
+        path = path[:-3]
+    return urlunparse(parsed._replace(path=path))
 
 
 class ClaudeTarget:
@@ -29,10 +48,7 @@ class ClaudeTarget:
     # Install / detection
     # ------------------------------------------------------------------
     def is_installed(self) -> bool:
-        return (
-            self.settings_path.parent.exists()
-            or shutil.which("claude") is not None
-        )
+        return shutil.which("claude") is not None
 
     def install(self, log: Callable[[str], None] = print) -> None:
         if shutil.which("brew") is not None:
@@ -57,37 +73,44 @@ class ClaudeTarget:
         log("  curl -fsSL https://claude.ai/install.sh | sh")
 
     # ------------------------------------------------------------------
-    # Provider fragment + keychain-aware apiKey ref
+    # Provider fragment + keychain-aware apiKeyHelper
     # ------------------------------------------------------------------
-    def _api_key_ref(self, provider: ProviderConfig) -> str:
-        """Return the apiKey value to embed — prefer a keychain `!command`.
-
-        Mirrors PyTarget: the keychain `!security find-internet-password ...`
-        shell-out reads the secret at request time, so settings.json holds no
-        plaintext. Falls back to the literal key when no entry exists
-        (e.g. --no-keychain was passed by the caller).
-        """
+    def _api_key_helper(
+        self,
+        provider: ProviderConfig,
+        *,
+        use_keychain: bool | None = None,
+    ) -> str | None:
+        """Return ``apiKeyHelper`` shell command when Keychain holds the key."""
         server = provider.keychain_server()
-        if kc.keychain_has(server):
-            return kc.security_command_ref(server)
-        return provider.api_key
+        if use_keychain is True:
+            return kc.security_command(server)
+        if use_keychain is None and kc.keychain_has(server):
+            return kc.security_command(server)
+        return None
 
-    def build_fragment(self, provider: ProviderConfig) -> dict:
+    def build_fragment(
+        self,
+        provider: ProviderConfig,
+        *,
+        use_keychain: bool | None = None,
+        redact: bool = False,
+    ) -> dict:
         primary = provider.models[0]
-        return {
-            "provider": provider.provider_name,
-            "apiBaseUrl": provider.normalized_api_url(),
-            "apiKey": self._api_key_ref(provider),
-            "models": [
-                {
-                    "id": m.name,
-                    "context_window": m.max_tokens,
-                    "max_tokens": m.max_output_tokens,
-                }
-                for m in provider.models
-            ],
+        env: dict[str, str] = {
+            "ANTHROPIC_BASE_URL": anthropic_base_url(provider.normalized_api_url()),
+            "BYOP_PROVIDER": provider.provider_name,
+        }
+        fragment: dict = {
+            "env": env,
             "model": primary.name,
         }
+        helper = self._api_key_helper(provider, use_keychain=use_keychain)
+        if helper is not None:
+            fragment["apiKeyHelper"] = helper
+        else:
+            env["ANTHROPIC_AUTH_TOKEN"] = "[REDACTED]" if redact else provider.api_key
+        return fragment
 
     # ------------------------------------------------------------------
     # Configure
@@ -108,6 +131,18 @@ class ClaudeTarget:
             json.dumps(data, indent=2) + "\n", encoding="utf-8"
         )
 
+    @staticmethod
+    def _extract_provider_name(data: dict) -> str | None:
+        env = data.get("env")
+        if isinstance(env, dict):
+            name = env.get("BYOP_PROVIDER")
+            if isinstance(name, str) and name:
+                return name
+        legacy = data.get("provider")
+        if isinstance(legacy, str) and legacy:
+            return legacy
+        return None
+
     def configure(
         self,
         provider: ProviderConfig,
@@ -125,9 +160,10 @@ class ClaudeTarget:
                 + "\n  - ".join(errors)
             )
 
-        fragment = self.build_fragment(provider)
-
         if dry_run:
+            fragment = self.build_fragment(
+                provider, use_keychain=use_keychain, redact=True
+            )
             log(
                 "[dry-run] Claude Code would write the following settings "
                 "fragment:"
@@ -135,70 +171,97 @@ class ClaudeTarget:
             log(json.dumps(fragment, indent=2))
             return
 
-        # Skip on idempotent re-run: existing entry already points at this
-        # provider and api_url. Still ensure the keychain (cheap and idempotent).
+        target_base_url = anthropic_base_url(provider.normalized_api_url())
         if conflict_action == "skip":
             existing = self._load()
+            raw_env = existing.get("env")
+            existing_env = raw_env if isinstance(raw_env, dict) else {}
             same = (
-                existing.get("provider") == provider.provider_name
-                and existing.get("apiBaseUrl") == provider.normalized_api_url()
+                self._extract_provider_name(existing) == provider.provider_name
+                and existing_env.get("ANTHROPIC_BASE_URL") == target_base_url
             )
             if same:
-                kc.ensure_key(
-                    server=provider.keychain_server(),
-                    api_key=provider.api_key,
-                    env_var=provider.env_var_name(),
-                    log=log,
-                    use_keychain=use_keychain,
-                    use_env=use_env,
-                )
+                if use_keychain or use_env:
+                    kc.ensure_key(
+                        server=provider.keychain_server(),
+                        api_key=provider.api_key,
+                        env_var=provider.env_var_name(),
+                        log=log,
+                        use_keychain=use_keychain,
+                        use_env=use_env,
+                    )
                 log(
                     f"Skip: Claude Code already has {provider.provider_name} "
-                    f"with the same api_url."
+                    f"with the same ANTHROPIC_BASE_URL."
                 )
                 return
 
-        # Default path: ensure the keychain entry, then write the fragment.
-        # Shallow merge at root preserves unknown keys.
-        kc.ensure_key(
-            server=provider.keychain_server(),
-            api_key=provider.api_key,
-            env_var=provider.env_var_name(),
-            log=log,
-            use_keychain=use_keychain,
-            use_env=use_env,
+        # Store key BEFORE build_fragment so Keychain detection sees fresh entries.
+        if use_keychain or use_env:
+            kc.ensure_key(
+                server=provider.keychain_server(),
+                api_key=provider.api_key,
+                env_var=provider.env_var_name(),
+                log=log,
+                use_keychain=use_keychain,
+                use_env=use_env,
+            )
+        fragment = self.build_fragment(
+            provider, use_keychain=False if not use_keychain else None
         )
+
         current = self._load()
-        merged = {**current, **fragment}
+        merged = {k: v for k, v in current.items() if k not in _LEGACY_KEYS}
+        current_env = current.get("env")
+        merged_env = dict(current_env) if isinstance(current_env, dict) else {}
+        merged_env.pop("ANTHROPIC_API_KEY", None)
+        if "apiKeyHelper" in fragment:
+            merged_env.pop("ANTHROPIC_AUTH_TOKEN", None)
+            merged["apiKeyHelper"] = fragment["apiKeyHelper"]
+        else:
+            merged.pop("apiKeyHelper", None)
+        merged_env.update(fragment["env"])
+        merged["env"] = merged_env
+        merged["model"] = fragment["model"]
+
         self._write(merged)
         log(f"Updated Claude Code settings at {self.settings_path}")
+        log(
+            "Note: Claude Code uses the Anthropic Messages API "
+            f"({target_base_url}/v1/messages); ensure your gateway exposes it."
+        )
+        if "apiKeyHelper" not in fragment:
+            log(
+                "Warning: --no-keychain was set, so ANTHROPIC_AUTH_TOKEN is "
+                "stored in settings.json in plaintext. Prefer removing "
+                "--no-keychain to use apiKeyHelper with the macOS keychain."
+            )
 
     def current_provider_names(self) -> list[str]:
-        data = self._load()
-        name = data.get("provider")
-        return [name] if isinstance(name, str) and name else []
+        name = self._extract_provider_name(self._load())
+        return [name] if name else []
 
     def export_config(self) -> dict:
-        """Return the byop-managed slice of Claude Code's ``settings.json``.
-
-        Claude Code is single-provider — there's at most one active provider,
-        so we surface it under the same ``providers`` key as multi-provider
-        targets, keyed by ``provider`` (or ``""`` if not set).
-        """
+        """Return the byop-managed slice of Claude Code's ``settings.json``."""
         data = self._load()
         providers: dict = {}
-        name = data.get("provider")
-        if isinstance(name, str) and name:
-            providers[name] = {
+        name = self._extract_provider_name(data)
+        if name:
+            raw_env = data.get("env")
+            env = raw_env if isinstance(raw_env, dict) else {}
+            entry: dict = {
                 "provider": name,
-                "apiBaseUrl": data.get("apiBaseUrl"),
-                "apiKey": data.get("apiKey"),
+                "anthropicBaseUrl": env.get("ANTHROPIC_BASE_URL") or data.get("apiBaseUrl"),
                 "model": data.get("model"),
             }
+            if "apiKeyHelper" in data:
+                entry["apiKeyHelper"] = data["apiKeyHelper"]
+            elif env.get("ANTHROPIC_AUTH_TOKEN"):
+                entry["authToken"] = "[REDACTED]"
+            providers[name] = entry
         return {
             self.name: {
                 "config_path": str(self.settings_path),
                 "providers": providers,
             }
         }
-

@@ -211,13 +211,22 @@ def test_py_configure_merges_existing_providers(tmp_path):
     assert "Other" in data["providers"]
 
 
-def test_py_dry_run_does_not_write(tmp_path):
+def test_py_dry_run_does_not_write_or_leak_secret(tmp_path):
     models = tmp_path / "models.json"
     target = PyTarget(models_path=models)
-    with mock.patch.object(target, "install"):
-        target.configure(_provider(), dry_run=True, log=lambda m: None)
+    logs: list[str] = []
+    with mock.patch.object(target, "install"), \
+         mock.patch("byop.core.targets.py.kc.keychain_has") as khas, \
+         mock.patch("byop.core.targets.py.kc.ensure_key") as ek:
+        target.configure(_provider(), dry_run=True, use_keychain=False, log=logs.append)
+        target.configure(_provider(), dry_run=True, use_keychain=True, log=logs.append)
     assert not models.exists()
-
+    khas.assert_not_called()
+    ek.assert_not_called()
+    joined = "\n".join(logs)
+    assert "sk-example12345678" not in joined
+    assert "[REDACTED]" in joined
+    assert "!security find-internet-password" in joined
 
 def test_py_append_uses_numeric_suffix(tmp_path):
     """On collision, append under ProviderName_2 (skipping already-taken suffixes)."""
@@ -281,3 +290,30 @@ def test_py_skip_when_provider_exists(tmp_path):
     data = _json.loads(models.read_text())
     # Original block untouched.
     assert data["providers"]["ExampleProvider"] == sentinel
+
+
+def test_stale_configuration_directories_do_not_imply_apps_are_installed(tmp_path, monkeypatch):
+    import shutil
+
+    from byop.core.targets.claude import ClaudeTarget
+    from byop.core.targets.omp import OmpTarget
+    from byop.core.targets.opencode import OpencodeTarget
+    from byop.core.targets.warp import WarpTarget
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+    monkeypatch.setattr("byop.core.targets.warp.WARP_APP", tmp_path / "Warp.app")
+    paths = [
+        tmp_path / ".pi" / "agent" / "models.json",
+        tmp_path / ".omp" / "agent" / "models.yml",
+        tmp_path / ".claude" / "settings.json",
+        tmp_path / ".config" / "opencode" / "opencode.json",
+        tmp_path / ".warp" / "settings.toml",
+    ]
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    targets = [
+        PyTarget(paths[0]), OmpTarget(paths[1]), ClaudeTarget(paths[2]),
+        OpencodeTarget(paths[3]), WarpTarget(paths[4]),
+    ]
+    assert all(not target.is_installed() for target in targets)

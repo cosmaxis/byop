@@ -51,7 +51,8 @@ def test_zed_export_config_includes_provider_block(tmp_path):
     assert snap[target.name]["providers"] == {}
 
     # After configuring, the snapshot should contain the provider block.
-    target.configure(_provider(), use_keychain=False, use_env=True)
+    with mock.patch("byop.core.keychain.ensure_key", return_value=["env:x"]):
+        target.configure(_provider(), use_keychain=False, use_env=True)
     snap = target.export_config()
     block = snap[target.name]["providers"]["ExampleProvider"]
     assert block["api_url"] == "https://api.example.com/v1"
@@ -63,7 +64,8 @@ def test_zed_export_config_includes_provider_block(tmp_path):
 def test_py_export_config_shape(tmp_path):
     models = tmp_path / "models.json"
     target = PyTarget(models_path=models)
-    target.configure(_provider(), use_keychain=False, use_env=True)
+    with mock.patch("byop.core.keychain.ensure_key", return_value=["env:x"]):
+        target.configure(_provider(), use_keychain=False, use_env=True)
     snap = target.export_config()
     assert snap[target.name]["config_path"] == str(models)
     block = snap[target.name]["providers"]["ExampleProvider"]
@@ -78,7 +80,8 @@ def test_py_export_config_shape(tmp_path):
 def test_opencode_export_config_shape(tmp_path):
     cfg = tmp_path / "opencode.json"
     target = OpencodeTarget(config_path=cfg)
-    target.configure(_provider(), use_keychain=False, use_env=True)
+    with mock.patch("byop.core.keychain.ensure_key", return_value=["env:x"]):
+        target.configure(_provider(), use_keychain=False, use_env=True)
     snap = target.export_config()
     assert snap[target.name]["config_path"] == str(cfg)
     block = snap[target.name]["providers"]["ExampleProvider"]
@@ -90,7 +93,8 @@ def test_omp_export_config_inherits_py(tmp_path):
     """OmpTarget subclasses PyTarget — same models.json shape."""
     models = tmp_path / "models.json"
     target = OmpTarget(models_path=models)
-    target.configure(_provider(), use_keychain=False, use_env=True)
+    with mock.patch("byop.core.keychain.ensure_key", return_value=["env:x"]):
+        target.configure(_provider(), use_keychain=False, use_env=True)
     snap = target.export_config()
     assert snap[target.name]["config_path"] == str(models)
     assert "ExampleProvider" in snap[target.name]["providers"]
