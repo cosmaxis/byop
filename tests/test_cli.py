@@ -47,7 +47,7 @@ def test_cli_dry_run_non_interactive(monkeypatch):
     )
 
     assert rc == 0
-    assert calls["install"] == 1
+    assert calls["install"] == 0
     assert calls["configure"] == 1
 
 
@@ -358,10 +358,10 @@ def test_cli_ctrl_c_exits_cleanly(monkeypatch, capsys, tmp_path):
     """Ctrl+C during the interactive wizard prints cancellation, not a traceback."""
     monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
 
-    def raise_keyboard_interrupt():
+    def raise_keyboard_interrupt(*args, **kwargs):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli.wizard, "run_wizard", raise_keyboard_interrupt)
+    monkeypatch.setattr(cli.prompt, "choose", raise_keyboard_interrupt)
 
     rc = cli.main([])
 
@@ -396,11 +396,11 @@ def test_cli_session_loop_quits(monkeypatch, tmp_path):
         call_count["status"] += 1
         return orig_status()
 
-    def fake_ask(prompt_text, default=""):
-        return "quit"
+    def fake_choose(prompt_text, options, default_index=0):
+        return "Quit"
 
     monkeypatch.setattr(cli, "_run_status", fake_status)
-    monkeypatch.setattr(cli.prompt, "ask", fake_ask)
+    monkeypatch.setattr(cli.prompt, "choose", fake_choose)
 
     rc = cli.main([])
 
@@ -454,3 +454,231 @@ def test_cli_interactive_apply_without_collision_succeeds_and_stores_key(monkeyp
     assert rc == 0
     assert keychain_calls == [("https://api.example.com/v1", "sk-interactive-123")]
     assert configured == [("sk-interactive-123", "replace")]
+
+
+def test_first_run_asks_before_setting_up_missing_app(monkeypatch, tmp_path):
+    import byop.core.targets as tmod
+    from byop.core.config import ModelConfig, ProviderConfig
+
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
+    provider = ProviderConfig("Demo", "https://api.example.com/v1", "secret-123", [ModelConfig("m")])
+    calls = []
+
+    class MissingTarget:
+        name = "zed"
+        display_name = "Zed"
+
+        def is_installed(self):
+            return False
+
+        def install(self, log=print):
+            calls.append("install")
+
+        def configure(self, provider, **kwargs):
+            calls.append("configure")
+
+        def current_provider_names(self):
+            return []
+
+    monkeypatch.setattr(tmod, "available_targets", lambda **kwargs: [MissingTarget()])
+    monkeypatch.setattr(cli.wizard, "run_wizard", lambda: (
+        provider, {"use_keychain": True, "use_env": False}
+    ))
+    monkeypatch.setattr(kc, "ensure_key", lambda *args, **kwargs: [])
+    monkeypatch.setattr(kc, "keychain_set", lambda *args: None)
+    monkeypatch.setattr(cli, "_run_status", lambda: 0)
+    actions = iter(["Set up tools", "Quit"])
+    monkeypatch.setattr(cli.prompt, "choose", lambda *args, **kwargs: next(actions))
+
+    def decline(question, default=False):
+        calls.append((question, default))
+        return False
+
+    monkeypatch.setattr(cli.prompt, "confirm", decline)
+    assert cli.main([]) == 0
+    assert calls == [("Install and configure Zed?", False)]
+
+
+def test_noninteractive_without_installed_targets_does_not_install_everything(monkeypatch):
+    import byop.core.targets as tmod
+
+    class MissingTarget:
+        name = "zed"
+        display_name = "Zed"
+
+        def is_installed(self):
+            return False
+
+        def install(self, **kwargs):
+            raise AssertionError("must not install an unselected app")
+
+        def configure(self, *args, **kwargs):
+            raise AssertionError("must not configure an unselected app")
+
+    monkeypatch.setattr(tmod, "available_targets", lambda **kwargs: [MissingTarget()])
+    assert cli.main([
+        "apply", "--provider", "Demo", "--api-url", "https://api.example.com/v1",
+        "--api-key", "secret-123", "--model", "m", "--dry-run",
+    ]) == 0
+
+
+def test_skip_install_asks_before_configuring_missing_app(monkeypatch):
+    import byop.core.targets as tmod
+
+    class MissingTarget:
+        name = "zed"
+        display_name = "Zed"
+
+        def is_installed(self):
+            return False
+
+    monkeypatch.setattr(tmod, "available_targets", lambda **kwargs: [MissingTarget()])
+    questions = []
+    monkeypatch.setattr(
+        cli.prompt, "confirm",
+        lambda question, default: questions.append((question, default)) or False,
+    )
+    args = cli.build_parser().parse_args(["apply", "--skip-install"])
+    assert cli._select_targets(args, interactive=True) == []
+    assert questions == [("Configure Zed without installing?", False)]
+
+
+def test_interactive_menu_adds_and_switches_provider(monkeypatch, tmp_path):
+    from byop.core.config import ModelConfig, ProviderConfig
+
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
+    original = ProviderConfig("Original", "https://old.example/v1", "old-secret", [ModelConfig("m")])
+    prof.save_profile(prof.profile_from_provider(original, name="default"))
+    added = ProviderConfig("New", "https://new.example/v1", "new-secret", [ModelConfig("m")])
+    monkeypatch.setattr(kc, "keychain_get", lambda *_: "old-secret")
+    monkeypatch.setattr(kc, "ensure_key", lambda *args, **kwargs: [])
+    monkeypatch.setattr(cli.wizard, "run_wizard", lambda prefill=None: (
+        added, {"use_keychain": True, "use_env": False}
+    ))
+    monkeypatch.setattr(cli.prompt, "ask", lambda *args, **kwargs: "new")
+    monkeypatch.setattr(cli, "_run_status", lambda: 0)
+    actions = iter(["Add provider", "Switch provider", "default", "Quit"])
+    def choose(*args, **kwargs):
+        action = next(actions)
+        if action == "Switch provider":
+            assert prof.get_active_profile_name() == "new"
+        return action
+
+    monkeypatch.setattr(cli.prompt, "choose", choose)
+
+    assert cli.main([]) == 0
+    assert prof.load_profile("new").provider_name == "New"
+    assert prof.get_active_profile_name() == "default"
+
+
+def test_missing_target_install_failure_does_not_write_configuration(monkeypatch, tmp_path):
+    import byop.core.targets as tmod
+
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(kc, "keychain_set", lambda *args: None)
+    calls = []
+
+    class MissingTarget:
+        name = "zed"
+        display_name = "Zed"
+
+        def is_installed(self):
+            return False
+
+        def current_provider_names(self):
+            return []
+
+        def install(self, log=print):
+            calls.append("install")
+
+        def configure(self, *args, **kwargs):
+            calls.append("configure")
+
+    monkeypatch.setattr(tmod, "available_targets", lambda **kwargs: [MissingTarget()])
+    assert cli.main([
+        "apply", "--provider", "Demo", "--api-url", "https://api.example.com/v1",
+        "--api-key", "secret-123", "--model", "m", "--target", "zed",
+    ]) == 1
+    assert calls == ["install"]
+
+
+def test_interactive_acceptance_installs_then_configures_missing_app(monkeypatch, tmp_path):
+    import byop.core.targets as tmod
+    from byop.core.config import ModelConfig, ProviderConfig
+
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
+    provider = ProviderConfig("Demo", "https://api.example.com/v1", "secret-123", [ModelConfig("m")])
+    calls = []
+
+    class MissingTarget:
+        name = "zed"
+        display_name = "Zed"
+        installed = False
+
+        def is_installed(self):
+            return self.installed
+
+        def current_provider_names(self):
+            return []
+
+        def install(self, log=print):
+            calls.append("install")
+            self.installed = True
+
+        def configure(self, provider, **kwargs):
+            calls.append("configure")
+
+    monkeypatch.setattr(tmod, "available_targets", lambda **kwargs: [MissingTarget()])
+    monkeypatch.setattr(cli.wizard, "run_wizard", lambda: (
+        provider, {"use_keychain": True, "use_env": False}
+    ))
+    monkeypatch.setattr(kc, "ensure_key", lambda *args, **kwargs: [])
+    monkeypatch.setattr(kc, "keychain_set", lambda *args: None)
+    monkeypatch.setattr(cli, "_run_status", lambda: 0)
+    actions = iter(["Set up tools", "Quit"])
+    monkeypatch.setattr(cli.prompt, "choose", lambda *args, **kwargs: next(actions))
+    monkeypatch.setattr(cli.prompt, "confirm", lambda question, default=False: True)
+
+    assert cli.main([]) == 0
+    assert calls == ["install", "configure"]
+
+
+def test_added_env_provider_can_be_used_in_same_session(monkeypatch, tmp_path):
+    import byop.core.targets as tmod
+    from byop.core.config import ModelConfig, ProviderConfig
+
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("DEMO_API_KEY", raising=False)
+    provider = ProviderConfig("Demo", "https://api.example.com/v1", "secret-123", [ModelConfig("m")])
+    applied = []
+
+    class InstalledTarget:
+        name = "zed"
+        display_name = "Zed"
+
+        def is_installed(self):
+            return True
+
+        def current_provider_names(self):
+            return []
+
+        def install(self, log=print):
+            pass
+
+        def configure(self, provider, **kwargs):
+            applied.append(provider.api_key)
+
+    monkeypatch.setattr(tmod, "available_targets", lambda **kwargs: [InstalledTarget()])
+    monkeypatch.setattr(cli.wizard, "run_wizard", lambda prefill=None: (
+        provider, {"use_keychain": False, "use_env": True}
+    ))
+    monkeypatch.setattr(kc, "ensure_key", lambda *args, **kwargs: [])
+    monkeypatch.setattr(cli.prompt, "ask", lambda *args, **kwargs: "work")
+    monkeypatch.setattr(cli.prompt, "confirm", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cli, "_run_status", lambda: 0)
+    actions = iter(["Add provider", "Set up tools", "Quit"])
+    monkeypatch.setattr(cli.prompt, "choose", lambda *args, **kwargs: next(actions))
+
+    assert cli.main([]) == 0
+    assert prof.load_profile("work").api_key_ref == "env:DEMO_API_KEY"
+    assert applied == ["secret-123"]

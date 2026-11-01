@@ -290,3 +290,30 @@ def test_py_skip_when_provider_exists(tmp_path):
     data = _json.loads(models.read_text())
     # Original block untouched.
     assert data["providers"]["ExampleProvider"] == sentinel
+
+
+def test_stale_configuration_directories_do_not_imply_apps_are_installed(tmp_path, monkeypatch):
+    import shutil
+
+    from byop.core.targets.claude import ClaudeTarget
+    from byop.core.targets.omp import OmpTarget
+    from byop.core.targets.opencode import OpencodeTarget
+    from byop.core.targets.warp import WarpTarget
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+    monkeypatch.setattr("byop.core.targets.warp.WARP_APP", tmp_path / "Warp.app")
+    paths = [
+        tmp_path / ".pi" / "agent" / "models.json",
+        tmp_path / ".omp" / "agent" / "models.yml",
+        tmp_path / ".claude" / "settings.json",
+        tmp_path / ".config" / "opencode" / "opencode.json",
+        tmp_path / ".warp" / "settings.toml",
+    ]
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    targets = [
+        PyTarget(paths[0]), OmpTarget(paths[1]), ClaudeTarget(paths[2]),
+        OpencodeTarget(paths[3]), WarpTarget(paths[4]),
+    ]
+    assert all(not target.is_installed() for target in targets)

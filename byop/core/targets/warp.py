@@ -97,7 +97,7 @@ class WarpTarget:
         self.settings_path = Path(settings_path)
 
     def is_installed(self) -> bool:
-        return WARP_APP.exists() or shutil.which("warp") is not None or self.settings_path.parent.exists()
+        return WARP_APP.exists() or (Path.home() / "Applications" / "Warp.app").exists() or shutil.which("warp") is not None
 
     def install(self, log: Callable[[str], None] = print) -> None:
         if shutil.which("brew"):

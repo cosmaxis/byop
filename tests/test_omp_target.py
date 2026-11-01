@@ -177,21 +177,13 @@ def test_omp_warns_when_appending_under_suffix(tmp_path):
     ), f"append must emit a Warning line; got: {messages}"
 
 
-def test_omp_detect_installed_uses_PATH_or_dir():
-    """is_installed is True when ~/.omp/ exists OR `omp` is on PATH."""
-    import shutil
-
-    with mock.patch.object(OmpTarget, "__init__", lambda self, models_path=None: None):
-        target = OmpTarget.__new__(OmpTarget)
-        target.models_path = Path("/tmp/whatever/models.json")
-        with mock.patch.object(Path, "exists", return_value=True):
-            assert target.is_installed() is True
-        with mock.patch.object(Path, "exists", return_value=False), \
-             mock.patch.object(shutil, "which", return_value="/usr/local/bin/omp"):
-            assert target.is_installed() is True
-        with mock.patch.object(Path, "exists", return_value=False), \
-             mock.patch.object(shutil, "which", return_value=None):
-            assert target.is_installed() is False
+def test_omp_config_directory_does_not_mean_installed(tmp_path):
+    target = OmpTarget(models_path=tmp_path / "agent" / "models.yml")
+    target.models_path.parent.mkdir()
+    with mock.patch("byop.core.targets.omp.shutil.which", return_value=None):
+        assert target.is_installed() is False
+    with mock.patch("byop.core.targets.omp.shutil.which", return_value="/usr/local/bin/omp"):
+        assert target.is_installed() is True
 
 
 def test_omp_dry_run_emits_yaml_without_leaking_secret(tmp_path):

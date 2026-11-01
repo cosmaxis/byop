@@ -25,11 +25,11 @@ def load(path):
     return tomlkit.parse(path.read_text()).unwrap()
 
 
-def test_detection_from_temp_settings(tmp_path):
+def test_existing_settings_do_not_imply_warp_is_installed(tmp_path, monkeypatch):
+    monkeypatch.setattr("byop.core.targets.warp.Path.home", lambda: tmp_path)
     with mock.patch("byop.core.targets.warp.WARP_APP", tmp_path / "Warp.app"), mock.patch("byop.core.targets.warp.shutil.which", return_value=None):
-        assert WarpTarget(tmp_path / ".warp" / "settings.toml").is_installed() is False
         (tmp_path / ".warp").mkdir()
-        assert WarpTarget(tmp_path / ".warp" / "settings.toml").is_installed() is True
+        assert WarpTarget(tmp_path / ".warp" / "settings.toml").is_installed() is False
 
 
 def test_dry_run_redacts_key_and_does_not_write(tmp_path):

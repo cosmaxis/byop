@@ -307,36 +307,43 @@ def _route_bare(parser: argparse.ArgumentParser, args: argparse.Namespace) -> in
 
 
 def _run_default_landing() -> int:
-    """The bare ``byop`` experience: interactive session that stays open.
-
-    Shows the status dashboard, then loops so the user can re-apply,
-    re-run the wizard, or manage profiles without re-invoking ``byop``.
-    """
+    """Show a menu for setup and provider profile management."""
     from .core import profiles as prof
 
-    # First-run: create a profile if none exists.
-    if not prof.profile_exists(prof.get_active_profile_name()):
-        prompt.header("byop — Custom LLM provider setup")
-        prompt.info("No saved profile found — let's create one.")
-        _run_first_run_wizard()
-
-    # Interactive session loop.
     while True:
-        _run_status()
-        prompt.header("Session")
-        prompt.info("  [bold]apply[/bold]          sync the active profile to targets")
-        prompt.info("  [bold]wizard[/bold]         reconfigure provider (interactive)")
-        prompt.info("  [bold]quit[/bold]           exit byop")
-        action = prompt.ask(
+        if prof.profile_exists(prof.get_active_profile_name()):
+            _run_status()
+        else:
+            prompt.header("byop — Bring Your Own Provider")
+            prompt.info("No active provider yet.")
+
+        action = prompt.choose(
             "What would you like to do?",
-            default="apply",
-        ).strip().lower()
-        if action in ("quit", "q", "exit"):
+            [
+                "Set up tools",
+                "Add provider",
+                "Switch provider",
+                "Edit active provider",
+                "Quit",
+            ],
+        )
+        if action == "Quit":
             return 0
-        if action in ("wizard", "w"):
+        if action == "Add provider":
+            _profile_new_interactive(activate=True)
+        elif action == "Switch provider":
+            names = prof.list_profiles()
+            if names:
+                name = prompt.choose("Select a provider profile", names)
+                prof.set_active_profile_name(name)
+                prompt.success(f"Active profile: {name}")
+            else:
+                prompt.warn("No saved providers. Choose Add provider first.")
+        elif action == "Edit active provider":
+            _profile_edit_interactive()
+        elif not prof.profile_exists(prof.get_active_profile_name()):
             _run_first_run_wizard()
-            continue
-        if action in ("apply", "a", ""):
+        else:
             profile = prof.load_profile()
             api_key = _load_profile_api_key(profile)
             args = _make_args_for_apply(
@@ -347,9 +354,7 @@ def _run_default_landing() -> int:
                     "use_env": profile.api_key_ref.startswith("env:"),
                 },
             )
-            _run_apply(args)
-            continue
-        prompt.warn(f"Unknown action: {action!r}. Try apply, wizard, or quit.")
+            _run_apply(args, interactive_session=True)
 
 
 def _run_first_run_wizard() -> int:
@@ -359,19 +364,26 @@ def _run_first_run_wizard() -> int:
     provider, prefs = wizard.run_wizard()
     profile_name = prof.DEFAULT_PROFILE_NAME
     api_key = provider.api_key
-    profile = prof.profile_from_provider(provider, name=profile_name)
-    # Save the secret to keychain so the profile's api_key_ref == "keychain"
-    # resolves at apply time.
-    if prefs["use_keychain"]:
-        from .core import keychain as kc
+    from .core import keychain as kc
 
-        kc.keychain_set(provider.keychain_server(), api_key)
+    use_keychain = prefs["use_keychain"]
+    use_env = prefs["use_env"] or not use_keychain
+    profile = prof.profile_from_provider(
+        provider, name=profile_name,
+        api_key_ref="keychain" if use_keychain else f"env:{provider.env_var_name()}",
+    )
+    kc.ensure_key(
+        provider.keychain_server(), api_key, provider.env_var_name(),
+        use_keychain=use_keychain, use_env=use_env, log=prompt.info,
+    )
+    if not use_keychain:
+        os.environ[provider.env_var_name()] = api_key
     prof.save_profile(profile, api_key=api_key)
     prompt.success(f"Saved profile {profile_name!r}.")
 
     # Continue with apply flow using the same provider.
     args = _make_args_for_apply(profile, api_key, prefs)
-    return _run_apply(args)
+    return _run_apply(args, interactive_session=True)
 def _make_args_for_apply(profile, api_key, prefs):
     primary = profile.models[0] if profile.models else None
     args = argparse.Namespace(
@@ -472,7 +484,7 @@ def _run_status(
     return 0
 
 
-def _run_apply(args: argparse.Namespace) -> int:
+def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -> int:
     """Sync a provider to selected targets — the renamed default behavior."""
     # Backwards-compat: ``byop --export-config`` (no subcommand) used to be a
     # top-level flag. The apply subparser doesn't declare it; default it.
@@ -543,6 +555,8 @@ def _run_apply(args: argparse.Namespace) -> int:
             api_key = provider.api_key
             use_keychain = prefs["use_keychain"] and not args.no_keychain
             use_env = prefs["use_env"] or args.env_key
+    if interactive_session:
+        non_interactive = False
     if not use_keychain and not use_env:
         use_env = True
 
@@ -566,7 +580,7 @@ def _run_apply(args: argparse.Namespace) -> int:
             kc.keychain_set(provider.keychain_server(), api_key)
 
     # ---- Select targets --------------------------------------------------
-    targets = _select_targets(args, provider)
+    targets = _select_targets(args, interactive=not non_interactive)
     if not targets:
         prompt.warn("No target applications selected. Nothing to do.")
         return 0
@@ -610,8 +624,15 @@ def _run_apply(args: argparse.Namespace) -> int:
     for target in targets:
         try:
             conflict_action = _pick(target)
-            if not args.skip_install:
+            installed = target.is_installed()
+            if not args.skip_install and not args.dry_run:
                 target.install(log=prompt.info)
+                if not installed and not target.is_installed():
+                    prompt.warn(
+                        f"{target.display_name} is still not installed; skipping setup."
+                    )
+                    success = False
+                    continue
             target.configure(
                 provider,
                 dry_run=args.dry_run,
@@ -703,7 +724,7 @@ def _run_profile(args: argparse.Namespace) -> int:
     return 2
 
 
-def _profile_new_interactive() -> int:
+def _profile_new_interactive(*, activate: bool = False) -> int:
     """Walk the user through creating a new saved profile."""
     from .core import profiles as prof
 
@@ -717,12 +738,26 @@ def _profile_new_interactive() -> int:
         saved = prof.load_profile(prof.DEFAULT_PROFILE_NAME)
         prefill = saved.to_provider_config(api_key=_load_profile_api_key(saved))
     collected, prefs = wizard.run_wizard(prefill=prefill)
-    profile = prof.profile_from_provider(collected, name=name)
-    if prefs["use_keychain"]:
-        from .core import keychain as kc
-        kc.keychain_set(collected.keychain_server(), collected.api_key)
+    from .core import keychain as kc
+
+    use_keychain = prefs["use_keychain"]
+    use_env = prefs["use_env"] or not use_keychain
+    profile = prof.profile_from_provider(
+        collected, name=name,
+        api_key_ref="keychain" if use_keychain else f"env:{collected.env_var_name()}",
+    )
+    kc.ensure_key(
+        collected.keychain_server(), collected.api_key, collected.env_var_name(),
+        use_keychain=use_keychain, use_env=use_env, log=prompt.info,
+    )
+    if not use_keychain:
+        os.environ[collected.env_var_name()] = collected.api_key
     prof.save_profile(profile, api_key=collected.api_key)
-    prompt.success(f"Saved profile {name!r}.")
+    if activate:
+        prof.set_active_profile_name(name)
+        prompt.success(f"Saved and activated profile {name!r}.")
+    else:
+        prompt.success(f"Saved profile {name!r}.")
     return 0
 
 
@@ -738,10 +773,20 @@ def _profile_edit_interactive() -> int:
     collected, prefs = wizard.run_wizard(
         prefill=saved.to_provider_config(api_key=_load_profile_api_key(saved))
     )
-    profile = prof.profile_from_provider(collected, name=name)
-    if prefs["use_keychain"]:
-        from .core import keychain as kc
-        kc.keychain_set(collected.keychain_server(), collected.api_key)
+    from .core import keychain as kc
+
+    use_keychain = prefs["use_keychain"]
+    use_env = prefs["use_env"] or not use_keychain
+    profile = prof.profile_from_provider(
+        collected, name=name,
+        api_key_ref="keychain" if use_keychain else f"env:{collected.env_var_name()}",
+    )
+    kc.ensure_key(
+        collected.keychain_server(), collected.api_key, collected.env_var_name(),
+        use_keychain=use_keychain, use_env=use_env, log=prompt.info,
+    )
+    if not use_keychain:
+        os.environ[collected.env_var_name()] = collected.api_key
     prof.save_profile(profile, allow_overwrite=True, api_key=collected.api_key)
     prompt.success(f"Updated profile {name!r}.")
     return 0
@@ -988,7 +1033,7 @@ def _provider_from_args(args: argparse.Namespace) -> ProviderConfig:
     )
 
 
-def _select_targets(args, provider: ProviderConfig | None) -> list:
+def _select_targets(args, *, interactive: bool) -> list:
     from .core.targets import available_targets, detect_installed
 
     target_kwargs = {"settings_path": args.settings}
@@ -1005,15 +1050,8 @@ def _select_targets(args, provider: ProviderConfig | None) -> list:
     installed = detect_installed(all_targets)
     installed_names = {t.name for t in installed}
 
-    non_interactive_args = any(
-        [args.provider, args.api_url, args.api_key, args.model, args.model_name]
-    )
-    if non_interactive_args or args.config_file is not None:
-        if installed:
-            return installed
-        if not args.skip_install:
-            return all_targets
-        return []
+    if not interactive:
+        return installed
 
     prompt.header("Target applications")
     prompt.info(
@@ -1029,9 +1067,12 @@ def _select_targets(args, provider: ProviderConfig | None) -> list:
             if prompt.confirm(f"Configure {target.display_name}?", default=True):
                 selected.append(target)
         else:
-            if prompt.confirm(
-                f"Install and configure {target.display_name}?", default=False
-            ):
+            question = (
+                f"Configure {target.display_name} without installing?"
+                if args.skip_install
+                else f"Install and configure {target.display_name}?"
+            )
+            if prompt.confirm(question, default=False):
                 selected.append(target)
     return selected
 

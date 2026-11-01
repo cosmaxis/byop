@@ -56,7 +56,7 @@ def has_brew() -> bool:
 
 
 def is_installed() -> bool:
-    return ZED_APP.exists()
+    return ZED_APP.exists() or (Path.home() / "Applications" / "Zed.app").exists() or shutil.which("zed") is not None
 
 
 def installed_version() -> str | None:

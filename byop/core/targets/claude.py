@@ -48,10 +48,7 @@ class ClaudeTarget:
     # Install / detection
     # ------------------------------------------------------------------
     def is_installed(self) -> bool:
-        return (
-            self.settings_path.parent.exists()
-            or shutil.which("claude") is not None
-        )
+        return shutil.which("claude") is not None
 
     def install(self, log: Callable[[str], None] = print) -> None:
         if shutil.which("brew") is not None:

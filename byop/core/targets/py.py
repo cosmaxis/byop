@@ -44,7 +44,7 @@ class PyTarget:
 
     # ------------------------------------------------------------------
     def is_installed(self) -> bool:
-        return shutil.which("pi") is not None or (Path.home() / ".pi").exists()
+        return shutil.which("pi") is not None
 
     def install(self, log: Callable[[str], None] = print) -> None:
         if shutil.which("brew") is not None:

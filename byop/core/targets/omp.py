@@ -395,10 +395,7 @@ class OmpTarget(PyTarget):
 
     # ------------------------------------------------------------------
     def is_installed(self) -> bool:
-        return (
-            self.models_path.parent.parent.exists()
-            or shutil.which("omp") is not None
-        )
+        return shutil.which("omp") is not None
 
     def install(self, log: Callable[[str], None] = print) -> None:
         if shutil.which("brew") is not None:

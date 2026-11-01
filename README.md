@@ -22,8 +22,8 @@ writes your secret to disk in plaintext.
 
 - **Multi-target** — detects which AI coding tools are installed and asks which
   to configure. Missing apps can be installed for you on the spot.
-- **Always up to date** — upgrades each selected app to the latest stable
-  release before configuring.
+- **Opt-in installs** — asks before installing missing tools in interactive
+  setup; explicit `--target` selections are intended for scripts.
 - **One provider, many tools** — configure Zed and py.dev from the same input.
 - **Non-destructive** — merges into each app's config, preserving your existing
   settings and comments.
@@ -111,25 +111,27 @@ pipx install "git+https://github.com/Cosmaxis/byop.git"
 byop
 ```
 
-You are guided through provider details, then `byop` detects your installed
-tools and asks which to configure:
+Choose an action from the menu:
 
+```text
+1. Set up tools
+2. Add provider
+3. Switch provider
+4. Edit active provider
+5. Quit
 ```
-=== byop — Custom LLM provider setup ===
-› Provider name (e.g. 'MyProvider'): MyProvider
-› API base URL (e.g. 'https://api.example.com/v1'): https://api.example.com/v1
-› API key: ********************************
-...
 
-=== Target applications ===
-  - Zed (installed)
-  - py.dev (Pi) (installed)
-› Configure Zed? [y/n] (y):
-› Configure py.dev (Pi)? [y/n] (y):
-```
+Choose **Set up tools** to create a provider if needed, then select apps to
+configure. For each missing app, byop asks whether to install and configure it;
+the default is **no**. If installation cannot complete, its setup is skipped.
+**Add provider** saves and activates a separate profile; **Switch provider**
+selects a saved profile without changing app settings until you set up tools.
+
+Non-interactive runs without `--target` configure detected apps only. Pass an
+explicit `--target` to select a missing app; with `--skip-install`, byop writes
+its configuration without installing it.
 
 ### Non-interactive (scripting / CI)
-```
 
 | Flag | Purpose |
 | --- | --- |
@@ -186,7 +188,7 @@ wizard:
 
 | Command | Purpose |
 | --- | --- |
-| `byop` | Status dashboard (or first-run wizard when no profile exists). |
+| `byop` | Interactive menu for tool setup and provider profiles. |
 | `byop status` | Read-only dashboard: active profile, target state, drift. |
 | `byop apply [flags]` | Sync the active profile to one or more targets. |
 | `byop doctor` | Detect drift between the profile and each target's settings. |

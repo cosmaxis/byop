@@ -40,7 +40,7 @@ class OpencodeTarget:
 
     # ------------------------------------------------------------------
     def is_installed(self) -> bool:
-        return self.config_path.parent.exists() or shutil.which("opencode") is not None
+        return shutil.which("opencode") is not None
 
     def install(self, log: Callable[[str], None] = print) -> None:
         if shutil.which("brew") is not None:
