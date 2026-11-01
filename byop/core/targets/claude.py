@@ -100,6 +100,10 @@ class ClaudeTarget:
         env: dict[str, str] = {
             "ANTHROPIC_BASE_URL": anthropic_base_url(provider.normalized_api_url()),
             "BYOP_PROVIDER": provider.provider_name,
+            "ANTHROPIC_CUSTOM_MODEL_OPTION": primary.name,
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": primary.display_name or primary.name,
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(primary.max_tokens),
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(primary.max_output_tokens),
         }
         fragment: dict = {
             "env": env,

@@ -90,6 +90,32 @@ def test_build_fragment_shape_with_keychain():
     assert not frag["apiKeyHelper"].startswith("!")
 
 
+def test_custom_gateway_model_limits_refresh_without_replacing_role_mappings(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({
+        "env": {"ANTHROPIC_DEFAULT_SONNET_MODEL": "existing-sonnet"},
+        "permissions": {"allow": ["Read"]},
+    }))
+    target = ClaudeTarget(settings_path=settings)
+    for name, label, context, output in [
+        ("pro", "Gateway Pro", 128000, 16000),
+        ("other-route", None, 256000, 32000),
+    ]:
+        target.configure(_provider(models=[
+            ModelConfig(name=name, display_name=label,
+                        max_tokens=context, max_output_tokens=output),
+            ModelConfig(name="not-selected", max_tokens=1000000),
+        ]), use_keychain=False, log=lambda _: None)
+        data = json.loads(settings.read_text())
+        assert data["model"] == name
+        assert data["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION"] == name
+        assert data["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"] == (label or name)
+        assert data["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == str(context)
+        assert data["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == str(output)
+        assert data["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "existing-sonnet"
+        assert data["permissions"] == {"allow": ["Read"]}
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS keychain required")
 def test_configure_first_run_stores_key_before_building_fragment(tmp_path):
     """First run (keychain initially empty) must store key first, then write apiKeyHelper."""
