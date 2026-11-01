@@ -74,9 +74,12 @@ The October 26, 2026 Cosmaxis diagnosis established that Warp's Anthropic Messag
 curl -sfS https://byop.cosmaxis.com/install | sh
 ```
 
-This installs the `byop` command (via [pipx](https://pipx.pypa.io) when
-available, pinned to the latest release). Requires macOS and Python 3.11+;
-Homebrew is used to install any missing prerequisites.
+This installs `byop` and its declared Python dependencies in an isolated
+[pipx](https://pipx.pypa.io) environment, pinned to the latest release. On
+macOS, the installer uses Homebrew to install missing Python 3.11+, Git, and
+pipx. If Homebrew is missing, it installs that first and may request your
+administrator password. Network access and the macOS system tools (including
+`curl`) are required.
 
 > Prefer to read before you run? Inspect the script first:
 > `curl -sfS https://byop.cosmaxis.com/install`
