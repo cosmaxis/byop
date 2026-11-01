@@ -360,6 +360,19 @@ def test_cli_ctrl_c_exits_cleanly(monkeypatch, capsys, tmp_path):
     assert "Cancelled." in capsys.readouterr().out
 
 
+def test_cli_ctrl_d_exits_cleanly(monkeypatch, capsys, tmp_path):
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
+
+    def end_input(*args, **kwargs):
+        raise EOFError
+
+    monkeypatch.setattr(cli.prompt, "choose", end_input)
+    assert cli.main([]) == 130
+    captured = capsys.readouterr()
+    assert "Cancelled." in captured.out
+    assert "Traceback" not in captured.err
+
+
 def test_cli_session_loop_quits(monkeypatch, tmp_path):
     """Bare byop with an existing profile enters the session loop and quits."""
     monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
@@ -488,6 +501,8 @@ def test_first_run_asks_before_setting_up_missing_app(monkeypatch, tmp_path):
     monkeypatch.setattr(cli.prompt, "confirm", decline)
     assert cli.main([]) == 0
     assert calls == [("Install and configure Zed?", False)]
+    assert prof.get_active_profile_name() == "Demo"
+    assert prof.list_profiles() == ["Demo"]
 
 
 def test_noninteractive_without_installed_targets_does_not_install_everything(monkeypatch):
@@ -546,19 +561,18 @@ def test_interactive_menu_adds_and_switches_provider(monkeypatch, tmp_path):
     monkeypatch.setattr(cli.wizard, "run_wizard", lambda prefill=None: (
         added, {"use_keychain": True, "use_env": False}
     ))
-    monkeypatch.setattr(cli.prompt, "ask", lambda *args, **kwargs: "new")
     monkeypatch.setattr(cli, "_run_status", lambda: 0)
-    actions = iter(["Add provider", "Switch provider", "default", "Quit"])
+    actions = iter(["Add provider", "Switch provider", "Original", "Quit"])
     def choose(*args, **kwargs):
         action = next(actions)
         if action == "Switch provider":
-            assert prof.get_active_profile_name() == "new"
+            assert prof.get_active_profile_name() == "New"
         return action
 
     monkeypatch.setattr(cli.prompt, "choose", choose)
 
     assert cli.main([]) == 0
-    assert prof.load_profile("new").provider_name == "New"
+    assert prof.load_profile("New").provider_name == "New"
     assert prof.get_active_profile_name() == "default"
 
 
@@ -664,12 +678,141 @@ def test_added_env_provider_can_be_used_in_same_session(monkeypatch, tmp_path):
         provider, {"use_keychain": False, "use_env": True}
     ))
     monkeypatch.setattr(kc, "ensure_key", lambda *args, **kwargs: [])
-    monkeypatch.setattr(cli.prompt, "ask", lambda *args, **kwargs: "work")
     monkeypatch.setattr(cli.prompt, "confirm", lambda *args, **kwargs: True)
     monkeypatch.setattr(cli, "_run_status", lambda: 0)
     actions = iter(["Add provider", "Set up tools", "Quit"])
     monkeypatch.setattr(cli.prompt, "choose", lambda *args, **kwargs: next(actions))
 
     assert cli.main([]) == 0
-    assert prof.load_profile("work").api_key_ref == "env:DEMO_API_KEY"
+    assert prof.load_profile("Demo").api_key_ref == "env:DEMO_API_KEY"
     assert applied == ["secret-123"]
+
+
+def test_adding_existing_provider_does_not_overwrite_or_store_key(monkeypatch, tmp_path):
+    from byop.core.config import ModelConfig, ProviderConfig
+
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
+    provider = ProviderConfig("Demo", "https://api.example.com/v1", "secret-123", [ModelConfig("m")])
+    prof.save_profile(prof.profile_from_provider(provider, name="default"))
+    monkeypatch.setattr(cli.wizard, "run_wizard", lambda: (
+        provider, {"use_keychain": True, "use_env": False}
+    ))
+    monkeypatch.setattr(kc, "ensure_key", lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("must not overwrite existing credentials")
+    ))
+    assert cli._profile_new_interactive(activate=True) == 2
+    assert prof.load_profile("default").provider_name == "Demo"
+    assert not prof.profile_exists("Demo")
+
+
+def test_zed_questions_only_appear_during_zed_setup(monkeypatch, tmp_path):
+    import byop.core.targets as tmod
+    from byop.core.config import ModelConfig, ProviderConfig
+
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
+    provider = ProviderConfig("Demo", "https://api.example.com/v1", "secret-123", [ModelConfig("m")])
+    prof.save_profile(prof.profile_from_provider(provider, name="Demo"))
+    prof.set_active_profile_name("Demo")
+    monkeypatch.setattr(kc, "keychain_get", lambda *_: "secret-123")
+    monkeypatch.setattr(kc, "keychain_set", lambda *args: None)
+    configured = {}
+    questions = []
+
+    class Target:
+        def __init__(self, name):
+            self.name = name
+            self.display_name = name
+
+        def is_installed(self):
+            return True
+
+        def current_provider_names(self):
+            return []
+
+        def configure(self, provider, **kwargs):
+            configured[self.name] = provider
+
+    monkeypatch.setattr(tmod, "available_targets", lambda **kwargs: [Target("zed"), Target("py")])
+    def confirm(question, default=False):
+        questions.append(question)
+        if question.startswith("Configure"):
+            return True
+        return question.startswith("Use for Git")
+
+    monkeypatch.setattr(cli.prompt, "confirm", confirm)
+    args = cli._make_args_for_apply(prof.load_profile("Demo"), "secret-123", {"use_keychain": True})
+    args.skip_install = True
+    assert cli._run_apply(args, interactive_session=True) == 0
+    assert any("default Agent model" in question for question in questions)
+    assert configured["zed"].set_default_agent is False
+    assert configured["zed"].set_commit_message is True
+    assert configured["py"].set_default_agent is True
+    assert prof.load_profile("Demo").set_commit_message is True
+
+
+def test_edit_provider_renames_profile_without_overwriting_another(monkeypatch, tmp_path):
+    from byop.core.config import ModelConfig, ProviderConfig
+
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
+    original = ProviderConfig("Demo", "https://api.example.com/v1", "secret-123", [ModelConfig("m")])
+    other = ProviderConfig("Other", "https://other.example/v1", "secret-456", [ModelConfig("m")])
+    prof.save_profile(prof.profile_from_provider(original, name="Demo"))
+    prof.save_profile(prof.profile_from_provider(other, name="Other"))
+    prof.set_active_profile_name("Demo")
+    monkeypatch.setattr(kc, "keychain_get", lambda *_: "secret-123")
+    writes = []
+    monkeypatch.setattr(kc, "ensure_key", lambda *args, **kwargs: writes.append(args))
+    monkeypatch.setattr(cli.wizard, "run_wizard", lambda **kwargs: (
+        other, {"use_keychain": True, "use_env": False}
+    ))
+
+    assert cli._profile_edit_interactive() == 2
+    assert prof.get_active_profile_name() == "Demo"
+    assert writes == []
+    assert prof.load_profile("Other").api_url == "https://other.example/v1"
+
+    renamed = ProviderConfig("Renamed", original.api_url, "secret-123", original.models)
+    monkeypatch.setattr(cli.wizard, "run_wizard", lambda **kwargs: (
+        renamed, {"use_keychain": True, "use_env": False}
+    ))
+    assert cli._profile_edit_interactive() == 0
+    assert prof.get_active_profile_name() == "Renamed"
+    assert prof.load_profile("Renamed").provider_name == "Renamed"
+    assert not prof.profile_exists("Demo")
+
+
+def test_interactive_apply_rejects_existing_provider_name(monkeypatch, tmp_path):
+    from byop.core.config import ModelConfig, ProviderConfig
+
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
+    original = ProviderConfig("Demo", "https://api.example.com/v1", "secret-123", [ModelConfig("m")])
+    other = ProviderConfig("Other", "https://other.example/v1", "secret-456", [ModelConfig("m")])
+    prof.save_profile(prof.profile_from_provider(original, name="Demo"))
+    prof.save_profile(prof.profile_from_provider(other, name="Other"))
+    prof.set_active_profile_name("Demo")
+    monkeypatch.setattr(kc, "keychain_get", lambda *_: "secret-123")
+    writes = []
+    monkeypatch.setattr(kc, "keychain_set", lambda *args: writes.append(args))
+    monkeypatch.setattr(cli.wizard, "run_wizard", lambda **kwargs: (
+        other, {"use_keychain": True, "use_env": False}
+    ))
+    assert cli.main(["apply", "--skip-install"]) == 2
+    assert prof.get_active_profile_name() == "Demo"
+    assert prof.load_profile("Other").api_url == "https://other.example/v1"
+    assert writes == []
+
+
+def test_scripted_apply_does_not_overwrite_unrelated_legacy_profile(monkeypatch, tmp_path):
+    from byop.core.config import ModelConfig, ProviderConfig
+
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
+    other = ProviderConfig("Other", "https://other.example/v1", "secret-456", [ModelConfig("m")])
+    prof.save_profile(prof.profile_from_provider(other, name="Demo"))
+    writes = []
+    monkeypatch.setattr(kc, "keychain_set", lambda *args: writes.append(args))
+    assert cli.main([
+        "apply", "--provider", "Demo", "--api-url", "https://api.example.com/v1",
+        "--api-key", "secret-123", "--model", "m", "--skip-install",
+    ]) == 2
+    assert prof.load_profile("Demo").provider_name == "Other"
+    assert writes == []

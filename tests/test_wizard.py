@@ -38,11 +38,6 @@ def test_run_wizard_builds_provider_and_prefs():
         False,  # interleaved reasoning
         False,  # max_tokens parameter
         False,  # add another model? -> no
-        True,   # default agent
-        True,   # inline assistant
-        False,  # commit message
-        False,  # thread summary
-        False,  # edit predictions
         True,   # use keychain
         False,  # use env
     ]
@@ -75,7 +70,7 @@ def test_run_wizard_multiple_models():
     confirm = [
         False, False, False, True,    # model 1 caps + add another? yes
         False, False, False, False,   # model 2 caps + add another? no
-        True, True, False, False, False, True, False,  # run_wizard prefs
+        True, False,  # use keychain, use env
     ]
     p_ask, p_secret, p_int, p_confirm = _patch_wizard(ask, ask_int, confirm)
     with p_ask, p_secret, p_int, p_confirm:
@@ -94,7 +89,6 @@ def test_run_wizard_keychain_opt_out():
     ask_int = [128000, 32000]
     confirm = [
         False, False, False, False,
-        True, True, False, False, False,
         False,  # use keychain? no
         True,   # use env? (default flips to True when keychain off)
     ]
@@ -121,11 +115,7 @@ def test_run_wizard_accepts_full_paste():
     )
     ask = [paste]  # only the paste prompt is asked
     ask_int = []
-    confirm = [
-        True, True, False, False, False, True, False,
-        # default_agent, inline_assistant, commit_message, thread_summary,
-        # edit_predictions, use_keychain, use_env
-    ]
+    confirm = [True, False]  # use keychain, use env
     p_ask, p_secret, p_int, p_confirm = _patch_wizard(ask, ask_int, confirm)
     with p_ask, p_secret, p_int, p_confirm:
         provider, prefs = wizard.run_wizard()
@@ -150,9 +140,7 @@ def test_run_wizard_falls_back_to_secret_prompt_when_paste_missing_key():
     )
     ask = [paste]
     ask_int = []
-    confirm = [
-        True, True, False, False, False, True, False,
-    ]
+    confirm = [True, False]  # use keychain, use env
     p_ask, p_secret, p_int, p_confirm = _patch_wizard(
         ask, ask_int, confirm, secret="sk-filled-in"
     )
@@ -170,6 +158,8 @@ def test_run_wizard_saved_prefill_empty_enter_keeps_stored_key():
         api_url="https://api.example.com/v1",
         api_key="sk-stored-keychain",
         models=[ModelConfig(name="hy3")],
+        set_commit_message=True,
+        use_edit_predictions=True,
     )
     ask = [
         "",  # paste prompt
@@ -178,7 +168,7 @@ def test_run_wizard_saved_prefill_empty_enter_keeps_stored_key():
     ]
     confirm = [
         False,  # reconfigure models? -> no
-        True, True, False, False, False, True, False,
+        True, False,  # use keychain, use env
     ]
     p_ask, p_secret, p_int, p_confirm = _patch_wizard(
         ask, [], confirm, secret=""
@@ -186,3 +176,5 @@ def test_run_wizard_saved_prefill_empty_enter_keeps_stored_key():
     with p_ask, p_secret, p_int, p_confirm:
         provider, _ = wizard.run_wizard(prefill=prefill)
     assert provider.api_key == "sk-stored-keychain"
+    assert provider.set_commit_message is True
+    assert provider.use_edit_predictions is True

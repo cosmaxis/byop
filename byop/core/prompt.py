@@ -7,6 +7,9 @@ to plain stdlib input/output otherwise so the tool works in minimal CI shells.
 from __future__ import annotations
 
 import getpass
+import os
+import select
+import shutil
 import sys
 
 try:  # pragma: no cover - optional dependency
@@ -78,27 +81,64 @@ def confirm(prompt: str, default: bool = False) -> bool:
 
 
 def choose(prompt: str, options: list[str], default_index: int = 0) -> str:
-    if _HAS_RICH:
-        from rich.prompt import Prompt as _P
+    if sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM") != "dumb":
+        import termios
+        import tty
 
-        display = "\n".join(
-            f"  {i+1}. {opt}" for i, opt in enumerate(options)
-        )
-        _console().print(display)
-        val = _P.ask(
-            _PROMPT_PREFIX + prompt,
-            choices=[str(i + 1) for i in range(len(options))],
-            default=str(default_index + 1),
-        )
-        return options[int(val) - 1]
+        fd = sys.stdin.fileno()
+        previous = termios.tcgetattr(fd)
+        index = default_index
+
+        def draw() -> None:
+            width = max(1, shutil.get_terminal_size(fallback=(80, 24)).columns - 4)
+            for i, option in enumerate(options):
+                marker = "›" if i == index else " "
+                sys.stdout.write(f"\r\033[2K{marker} {option[:width]}\n")
+            sys.stdout.flush()
+
+        try:
+            tty.setcbreak(fd)
+            sys.stdout.write(f"{_PROMPT_PREFIX}{prompt} (↑/↓ to move, Enter to select)\n")
+            draw()
+            while True:
+                key = os.read(fd, 1)
+                if not key or key == b"\x04":
+                    raise EOFError
+                if key in (b"\r", b"\n"):
+                    return options[index]
+                if key == b"\x1b":
+                    if not select.select([fd], [], [], 0.1)[0]:
+                        raise KeyboardInterrupt
+                    prefix = os.read(fd, 1)
+                    if prefix not in (b"[", b"O") or not select.select([fd], [], [], 0.1)[0]:
+                        continue
+                    key = os.read(fd, 1)
+                    if key == b"A":
+                        index = (index - 1) % len(options)
+                    elif key == b"B":
+                        index = (index + 1) % len(options)
+                    else:
+                        continue
+                elif key in (b"k", b"j"):
+                    index = (index + (-1 if key == b"k" else 1)) % len(options)
+                else:
+                    continue
+                sys.stdout.write(f"\033[{len(options)}A")
+                draw()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, previous)
+
+    # Non-interactive input keeps a numbered fallback for scripts and pipes.
     print(_PROMPT_PREFIX + prompt)
-    for i, opt in enumerate(options):
-        print(f"  {i+1}. {opt}")
-    raw = _strip_escape_chars(
-        input(f"Select [1-{len(options)}] [{default_index+1}]: ")
-    ).strip()
-    idx = int(raw) - 1 if raw else default_index
-    return options[idx]
+    for i, option in enumerate(options):
+        print(f"  {i + 1}. {option}")
+    while True:
+        raw = _strip_escape_chars(input(f"Select [1-{len(options)}] [{default_index + 1}]: ")).strip()
+        if not raw:
+            return options[default_index]
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return options[int(raw) - 1]
+        warn("Choose one of the displayed numbers.")
 
 
 def header(title: str) -> None:

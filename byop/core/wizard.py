@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from . import default_model_capabilities, prompt
 from .config import ModelConfig, ProviderConfig
 from .paste import REQUIRED_KEYS, looks_like_provider_paste, parse_provider_paste
@@ -11,8 +13,7 @@ def _ask_models(provider_display: str) -> list[ModelConfig]:
     models: list[ModelConfig] = []
     prompt.header("Models")
     prompt.info(
-        "Configure one or more models. The first model becomes the default "
-        "for the agent and inline assistant."
+        "Configure one or more models. The first model becomes the default."
     )
     while True:
         name = prompt.ask("Model ID (sent to the API, e.g. 'hy3')")
@@ -72,8 +73,8 @@ def run_wizard(prefill: ProviderConfig | None = None) -> tuple[ProviderConfig, d
 
     prompt.header("byop — Custom LLM provider setup")
     prompt.info(
-        "This wizard installs/upgrades the supported AI coding tools and wires "
-        "a custom OpenAI-compatible provider into them."
+        "Enter your provider details. Tool-specific settings are configured "
+        "when you set up each tool."
     )
 
     # First prompt: paste JSON or press Enter to fill in fields. We try to
@@ -163,31 +164,6 @@ def run_wizard(prefill: ProviderConfig | None = None) -> tuple[ProviderConfig, d
     else:
         models = _ask_models(provider_name)
 
-    prompt.header("Feature wiring")
-    prompt.info(
-        "Zed can use this provider for different AI features. The first "
-        "model is used where a single model is required."
-    )
-    set_default = prompt.confirm(
-        "Set as the default Agent model?",
-        default=(prefill.set_default_agent if prefill else True),
-    )
-    set_inline = prompt.confirm(
-        "Set as the Inline Assistant model?",
-        default=(prefill.set_inline_assistant if prefill else True),
-    )
-    set_commit = prompt.confirm(
-        "Use for Git commit messages?",
-        default=(prefill.set_commit_message if prefill else False),
-    )
-    set_summary = prompt.confirm(
-        "Use for thread summaries?",
-        default=(prefill.set_thread_summary if prefill else False),
-    )
-    use_edit = prompt.confirm(
-        "Enable Edit Predictions (autocomplete) with this provider?",
-        default=(prefill.use_edit_predictions if prefill else False),
-    )
 
     prompt.header("API key storage")
     use_keychain = prompt.confirm(
@@ -203,10 +179,34 @@ def run_wizard(prefill: ProviderConfig | None = None) -> tuple[ProviderConfig, d
         api_url=api_url,
         api_key=api_key,
         models=models,
-        set_default_agent=set_default,
-        set_inline_assistant=set_inline,
-        set_commit_message=set_commit,
-        set_thread_summary=set_summary,
-        use_edit_predictions=use_edit,
+        set_default_agent=prefill.set_default_agent if prefill else True,
+        set_inline_assistant=prefill.set_inline_assistant if prefill else True,
+        set_commit_message=prefill.set_commit_message if prefill else False,
+        set_thread_summary=prefill.set_thread_summary if prefill else False,
+        use_edit_predictions=prefill.use_edit_predictions if prefill else False,
     )
     return provider, {"use_keychain": use_keychain, "use_env": use_env}
+
+
+def configure_zed_features(provider: ProviderConfig) -> ProviderConfig:
+    """Ask about Zed-specific features only when setting up Zed."""
+    prompt.header("Zed features")
+    return replace(
+        provider,
+        set_default_agent=prompt.confirm(
+            "Set as the default Agent model?", default=provider.set_default_agent
+        ),
+        set_inline_assistant=prompt.confirm(
+            "Set as the Inline Assistant model?", default=provider.set_inline_assistant
+        ),
+        set_commit_message=prompt.confirm(
+            "Use for Git commit messages?", default=provider.set_commit_message
+        ),
+        set_thread_summary=prompt.confirm(
+            "Use for thread summaries?", default=provider.set_thread_summary
+        ),
+        use_edit_predictions=prompt.confirm(
+            "Enable Edit Predictions (autocomplete) with this provider?",
+            default=provider.use_edit_predictions,
+        ),
+    )

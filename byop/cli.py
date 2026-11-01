@@ -215,7 +215,7 @@ def _add_apply_args(p: argparse.ArgumentParser) -> None:
 def main(argv: list[str] | None = None) -> int:
     try:
         return _main(argv)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):
         prompt.warn("Cancelled.")
         return 130
 
@@ -334,9 +334,14 @@ def _run_default_landing() -> int:
         elif action == "Switch provider":
             names = prof.list_profiles()
             if names:
-                name = prompt.choose("Select a provider profile", names)
-                prof.set_active_profile_name(name)
-                prompt.success(f"Active profile: {name}")
+                profiles = [prof.load_profile(name) for name in names]
+                labels = [profile.provider_name for profile in profiles]
+                if len(set(labels)) != len(labels):
+                    labels = [f"{profile.provider_name} ({profile.name})" for profile in profiles]
+                selected = prompt.choose("Select a provider", labels)
+                chosen = profiles[labels.index(selected)]
+                prof.set_active_profile_name(chosen.name)
+                prompt.success(f"Active provider: {chosen.provider_name}")
             else:
                 prompt.warn("No saved providers. Choose Add provider first.")
         elif action == "Edit active provider":
@@ -362,7 +367,14 @@ def _run_first_run_wizard() -> int:
     from .core import profiles as prof
 
     provider, prefs = wizard.run_wizard()
-    profile_name = prof.DEFAULT_PROFILE_NAME
+    profile_name = provider.provider_name
+    errors = provider.validate()
+    if errors:
+        prompt.error("Invalid provider configuration: " + "; ".join(errors))
+        return 2
+    if prof.profile_exists(profile_name) or _profile_for_provider(profile_name):
+        prompt.error(f"Provider {profile_name!r} already exists. Switch to it or edit it.")
+        return 2
     api_key = provider.api_key
     from .core import keychain as kc
 
@@ -379,6 +391,7 @@ def _run_first_run_wizard() -> int:
     if not use_keychain:
         os.environ[provider.env_var_name()] = api_key
     prof.save_profile(profile, api_key=api_key)
+    prof.set_active_profile_name(profile_name)
     prompt.success(f"Saved profile {profile_name!r}.")
 
     # Continue with apply flow using the same provider.
@@ -433,6 +446,16 @@ def _load_profile_api_key(profile) -> str:
         profile.env_var or profile.api_key_ref.removeprefix("env:"), ""
     )
 
+
+def _profile_for_provider(provider_name: str) -> str | None:
+    """Find an existing profile, including profiles created with older names."""
+    from .core import profiles as prof
+
+    for name in prof.list_profiles():
+        if prof.load_profile(name).provider_name == provider_name:
+            return name
+    return None
+
 # ===========================================================================
 # status / apply / profile / doctor / export-config
 # ===========================================================================
@@ -456,7 +479,7 @@ def _run_status(
     targets = available_targets(**target_kwargs)  # type: ignore[arg-type]
 
     prompt.header("byop — Bring Your Own Provider")
-    prompt.info(f"Profile: [bold]{profile.name}[/bold]  ({profile.provider_name})")
+    prompt.info(f"Provider: [bold]{profile.provider_name}[/bold]")
     prompt.info(f"API URL: {profile.api_url}")
     prompt.info(f"Key:     {profile.api_key_ref}{':' + profile.env_var if profile.env_var else ''}")
     model_names = [m.name for m in profile.models]
@@ -564,7 +587,19 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
     if not args.dry_run:
         from .core import profiles as prof
 
-        profile_name = prof.get_active_profile_name()
+        active_name = prof.get_active_profile_name()
+        existing = prof.load_profile(active_name) if prof.profile_exists(active_name) else None
+        profile_name = (
+            active_name if existing and existing.provider_name == provider.provider_name
+            else _profile_for_provider(provider.provider_name) or provider.provider_name
+        )
+        destination = prof.load_profile(profile_name) if prof.profile_exists(profile_name) else None
+        if destination and destination.provider_name != provider.provider_name:
+            prompt.error(f"Profile {profile_name!r} already belongs to another provider.")
+            return 2
+        if not non_interactive and profile_name != active_name and prof.profile_exists(profile_name):
+            prompt.error(f"Provider {profile_name!r} already exists. Switch to it or choose another name.")
+            return 2
         profile = prof.profile_from_provider(
             provider, name=profile_name,
             api_key_ref="keychain" if use_keychain else f"env:{provider.env_var_name()}",
@@ -575,6 +610,8 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
         else:
             prof.save_profile(profile, api_key=api_key)
             prompt.info(f"Saved profile {profile_name!r} (active).")
+        if profile_name != active_name:
+            prof.set_active_profile_name(profile_name)
         if use_keychain and api_key:
             from .core import keychain as kc
             kc.keychain_set(provider.keychain_server(), api_key)
@@ -633,14 +670,25 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
                     )
                     success = False
                     continue
+            target_provider = provider
+            if target.name == "zed" and not non_interactive and conflict_action != "skip":
+                target_provider = wizard.configure_zed_features(provider)
             target.configure(
-                provider,
+                target_provider,
                 dry_run=args.dry_run,
                 use_keychain=use_keychain,
                 use_env=use_env,
                 conflict_action=conflict_action,
                 log=prompt.info,
             )
+            if target_provider is not provider and not args.dry_run:
+                saved_profile = prof.load_profile()
+                saved_profile.set_default_agent = target_provider.set_default_agent
+                saved_profile.set_inline_assistant = target_provider.set_inline_assistant
+                saved_profile.set_commit_message = target_provider.set_commit_message
+                saved_profile.set_thread_summary = target_provider.set_thread_summary
+                saved_profile.use_edit_predictions = target_provider.use_edit_predictions
+                prof.save_profile(saved_profile, allow_overwrite=True)
         except ValueError as exc:
             prompt.error(f"{target.display_name}: {exc}")
             success = False
@@ -728,16 +776,15 @@ def _profile_new_interactive(*, activate: bool = False) -> int:
     """Walk the user through creating a new saved profile."""
     from .core import profiles as prof
 
-    name = prompt.ask("Profile name", default=prof.DEFAULT_PROFILE_NAME)
-    if prof.profile_exists(name):
-        prompt.error(f"Profile {name!r} already exists. Use `byop profile edit {name}`.")
+    collected, prefs = wizard.run_wizard()
+    name = collected.provider_name
+    errors = collected.validate()
+    if errors:
+        prompt.error("Invalid provider configuration: " + "; ".join(errors))
         return 2
-
-    prefill: ProviderConfig | None = None
-    if prof.profile_exists(prof.DEFAULT_PROFILE_NAME):
-        saved = prof.load_profile(prof.DEFAULT_PROFILE_NAME)
-        prefill = saved.to_provider_config(api_key=_load_profile_api_key(saved))
-    collected, prefs = wizard.run_wizard(prefill=prefill)
+    if prof.profile_exists(name) or _profile_for_provider(name):
+        prompt.error(f"Provider {name!r} already exists. Switch to it or edit it.")
+        return 2
     from .core import keychain as kc
 
     use_keychain = prefs["use_keychain"]
@@ -773,12 +820,20 @@ def _profile_edit_interactive() -> int:
     collected, prefs = wizard.run_wizard(
         prefill=saved.to_provider_config(api_key=_load_profile_api_key(saved))
     )
+    errors = collected.validate()
+    if errors:
+        prompt.error("Invalid provider configuration: " + "; ".join(errors))
+        return 2
+    new_name = collected.provider_name if collected.provider_name != saved.provider_name else name
+    if new_name != name and (prof.profile_exists(new_name) or _profile_for_provider(new_name)):
+        prompt.error(f"Provider {new_name!r} already exists. Choose a different name.")
+        return 2
     from .core import keychain as kc
 
     use_keychain = prefs["use_keychain"]
     use_env = prefs["use_env"] or not use_keychain
     profile = prof.profile_from_provider(
-        collected, name=name,
+        collected, name=new_name,
         api_key_ref="keychain" if use_keychain else f"env:{collected.env_var_name()}",
     )
     kc.ensure_key(
@@ -787,8 +842,11 @@ def _profile_edit_interactive() -> int:
     )
     if not use_keychain:
         os.environ[collected.env_var_name()] = collected.api_key
-    prof.save_profile(profile, allow_overwrite=True, api_key=collected.api_key)
-    prompt.success(f"Updated profile {name!r}.")
+    prof.save_profile(profile, allow_overwrite=new_name == name, api_key=collected.api_key)
+    if new_name != name:
+        prof.set_active_profile_name(new_name)
+        prof.delete_profile(name)
+    prompt.success(f"Updated profile {new_name!r}.")
     return 0
 
 
