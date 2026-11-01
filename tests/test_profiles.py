@@ -141,8 +141,8 @@ def test_profile_from_provider_round_trip(isolated_config):
     from byop.core.config import ProviderConfig
 
     provider = ProviderConfig(
-        provider_name="HyberOrbit",
-        api_url="https://api.hyberorbit.com/v1/",
+        provider_name="Cosmaxis",
+        api_url="https://api.cosmaxis.com/v1/",
         api_key="sk-not-stored",
         models=[
             ModelConfig(name="command-code", max_tokens=1_000_000,
@@ -156,7 +156,7 @@ def test_profile_from_provider_round_trip(isolated_config):
     # The api_key is not stored on the Profile.
     assert profile.api_key_ref == "keychain"
     # URL is normalized (trailing slash stripped).
-    assert profile.api_url == "https://api.hyberorbit.com/v1"
+    assert profile.api_url == "https://api.cosmaxis.com/v1"
     assert profile.set_commit_message is True
     assert profile.set_inline_assistant is False
 

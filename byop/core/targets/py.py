@@ -37,14 +37,14 @@ class PyTarget:
     """
 
     name = "py"
-    display_name = "py.dev (Pi)"
+    display_name = "py.dev"
 
     def __init__(self, models_path: Path = MODELS_PATH) -> None:
         self.models_path = models_path
 
     # ------------------------------------------------------------------
     def is_installed(self) -> bool:
-        return shutil.which("pi") is not None or (Path.home() / ".pi").exists()
+        return shutil.which("pi") is not None
 
     def install(self, log: Callable[[str], None] = print) -> None:
         if shutil.which("brew") is not None:
@@ -68,18 +68,26 @@ class PyTarget:
         log("then re-run byop.")
 
     # ------------------------------------------------------------------
-    def _api_key_ref(self, provider: ProviderConfig) -> str:
+    def _api_key_ref(
+        self,
+        provider: ProviderConfig,
+        *,
+        use_keychain: bool | None = None,
+        redact: bool = False,
+    ) -> str:
         """Return the ``apiKey`` value to write for Pi.
 
         Prefer a keychain ``!command`` read (secure, launch-independent).
-        Fall back to the literal key if no keychain entry is present.
+        Fall back to the literal key (or ``[REDACTED]`` in dry-run) when
+        keychain storage is disabled or absent.
         """
 
         server = provider.keychain_server()
-        if kc.keychain_has(server):
+        if use_keychain is True:
             return kc.security_command_ref(server)
-        return provider.api_key
-
+        if use_keychain is None and kc.keychain_has(server):
+            return kc.security_command_ref(server)
+        return "[REDACTED]" if redact else provider.api_key
     # ------------------------------------------------------------------
     def _model_entry(self, model: ModelConfig) -> dict:
         entry: dict = {
@@ -102,11 +110,22 @@ class PyTarget:
                 }
         return entry
 
-    def build_fragment(self, provider: ProviderConfig) -> dict:
+    def _format_dry_run(self, fragment: dict) -> str:
+        return json.dumps(fragment, indent=2)
+
+    def build_fragment(
+        self,
+        provider: ProviderConfig,
+        *,
+        use_keychain: bool | None = None,
+        redact: bool = False,
+    ) -> dict:
         provider_block: dict = {
             "baseUrl": provider.normalized_api_url(),
             "api": "openai-completions",
-            "apiKey": self._api_key_ref(provider),
+            "apiKey": self._api_key_ref(
+                provider, use_keychain=use_keychain, redact=redact
+            ),
             "authHeader": True,
         }
         any_max_tokens_param = any(
@@ -145,10 +164,14 @@ class PyTarget:
                              "\n  - ".join(errors))
 
         if dry_run:
-            fragment = self.build_fragment(provider)
-            log(f"[dry-run] {self.display_name} would write the following "
-                f"models.json fragment:")
-            log(json.dumps(fragment, indent=2))
+            fragment = self.build_fragment(
+                provider, use_keychain=use_keychain, redact=True
+            )
+            log(
+                f"[dry-run] {self.display_name} would write the following "
+                f"{self.models_path.name} fragment:"
+            )
+            log(self._format_dry_run(fragment))
             return
 
         # Conflict resolution: skip on idempotent re-run, append with a
@@ -194,18 +217,19 @@ class PyTarget:
         # secure ``!command`` (launch-independent) instead of embedding it.
         # Only skipped when the user explicitly passes --no-keychain, in which
         # case the key is embedded in plaintext (see warning below).
-        if use_keychain:
+        if use_keychain or use_env:
             kc.ensure_key(
                 server=provider.keychain_server(),
                 api_key=provider.api_key,
                 env_var=provider.env_var_name(),
                 log=log,
-                use_keychain=True,
+                use_keychain=use_keychain,
                 use_env=use_env,
             )
 
-        fragment = self.build_fragment(provider)
-
+        fragment = self.build_fragment(
+            provider, use_keychain=False if not use_keychain else None
+        )
         # Merge into models.json preserving other providers.
         self.models_path.parent.mkdir(parents=True, exist_ok=True)
         current = self._load()

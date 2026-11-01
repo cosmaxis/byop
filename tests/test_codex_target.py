@@ -1,6 +1,7 @@
 """Tests for the Codex target."""
 
 import json
+import subprocess
 import tomllib
 from pathlib import Path
 from unittest import mock
@@ -9,6 +10,20 @@ import pytest
 
 from byop.core.config import ModelConfig, ProviderConfig
 from byop.core.targets.codex import CodexTarget
+
+
+@pytest.fixture(autouse=True)
+def isolated_codex_catalog(monkeypatch):
+    """Use a deterministic bundled catalog without invoking Codex or touching user files."""
+    bundled = {"models": [{
+        "slug": "built-in", "display_name": "Built-in",
+        "model_messages": {"instructions_template": "bundled instructions"},
+    }]}
+    monkeypatch.setattr("byop.core.targets.codex.shutil.which", lambda name: "/fake/codex")
+    monkeypatch.setattr(
+        "byop.core.targets.codex.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, json.dumps(bundled), ""),
+    )
 
 
 def _provider(**over):
@@ -26,8 +41,10 @@ def test_codex_default_path():
     assert CodexTarget().config_path == Path.home() / ".codex" / "config.toml"
 
 
-def test_codex_is_installed_detects_config_parent(tmp_path):
-    assert CodexTarget(tmp_path / "config.toml").is_installed() is True
+def test_codex_settings_directory_alone_does_not_imply_installation(tmp_path, monkeypatch):
+    monkeypatch.setattr("byop.core.targets.codex.shutil.which", lambda _: None)
+    with mock.patch.object(Path, "exists", return_value=False):
+        assert CodexTarget(tmp_path / "config.toml").is_installed() is False
 
 
 def test_codex_build_fragment_uses_responses_and_env_key():
@@ -95,7 +112,7 @@ def test_codex_build_fragment_includes_reasoning_and_catalog(tmp_path):
     target = CodexTarget(tmp_path / "config.toml", catalog_dir=tmp_path / "catalogs")
     frag = target.build_fragment(_provider(), use_keychain=False, use_env=True)
     assert frag["model_reasoning_effort"] == "high"
-    assert frag["model_supports_reasoning_summaries"] is True
+    assert "model_supports_reasoning_summaries" not in frag
     assert frag["model_catalog_json"].endswith("HyberOrbit.json")
     assert "model_providers" in frag
 
@@ -167,3 +184,78 @@ def test_codex_dry_run_does_not_write(tmp_path):
         target.configure(_provider(), dry_run=True, use_keychain=False, use_env=True, log=lambda _: None)
     wt.assert_not_called()
     assert not (cat_dir / "HyberOrbit.json").exists()
+
+
+def test_codex_preserves_comments_permissions_and_symlink(tmp_path):
+    destination = tmp_path / "dotfiles.toml"
+    destination.write_text('# keep this comment\n[features]\njs_repl = false\n')
+    destination.chmod(0o600)
+    link = tmp_path / "config.toml"
+    link.symlink_to(destination)
+    with mock.patch("byop.core.targets.codex.kc.ensure_key"):
+        CodexTarget(link).configure(_provider(), use_keychain=False, use_env=True, log=lambda _: None)
+    assert link.is_symlink()
+    assert "# keep this comment" in destination.read_text()
+    assert destination.stat().st_mode & 0o777 == 0o600
+    assert tomllib.loads(destination.read_text())["features"]["js_repl"] is False
+
+
+def test_codex_switches_auth_without_leaking_existing_secrets(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        'model_provider = "HyberOrbit"\n'
+        '[model_providers.HyberOrbit]\n'
+        'base_url = "https://user:password@example.com/v1?token=secret-query"\n'
+        'experimental_bearer_token = "secret-token"\n'
+        'http_headers = { Authorization = "secret-header" }\n'
+    )
+    target = CodexTarget(cfg)
+    exported = json.dumps(target.export_config())
+    for secret in ("password", "secret-query", "secret-token", "secret-header"):
+        assert secret not in exported
+
+    with mock.patch("byop.core.targets.codex.kc.ensure_key"):
+        target.configure(_provider(), use_keychain=True, log=lambda _: None)
+        target.configure(_provider(), use_keychain=False, use_env=True, log=lambda _: None)
+    data = tomllib.loads(cfg.read_text())
+    block = data["model_providers"]["HyberOrbit"]
+    assert block["env_key"] == "HYBERORBIT_API_KEY"
+    assert "auth" not in block and "experimental_bearer_token" not in block
+    assert block["http_headers"]["Authorization"] == "secret-header"
+
+
+def test_codex_skip_preserves_active_provider_and_credentials(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('model_provider = "Other"\nmodel = "old"\n')
+    original = cfg.read_bytes()
+    with mock.patch("byop.core.targets.codex.kc.ensure_key") as ensure_key:
+        CodexTarget(cfg).configure(_provider(), conflict_action="skip", log=lambda _: None)
+    assert cfg.read_bytes() == original
+    ensure_key.assert_not_called()
+
+
+def test_codex_reverts_catalog_when_config_write_fails(tmp_path):
+    cfg = tmp_path / "config.toml"
+    target = CodexTarget(cfg)
+    catalog = target.catalog_dir / "HyberOrbit.json"
+    catalog.parent.mkdir()
+    catalog.write_text("previous catalog")
+    with mock.patch("byop.core.targets.codex.kc.ensure_key"), \
+         mock.patch.object(target, "_write", side_effect=OSError("disk full")), \
+         pytest.raises(OSError, match="disk full"):
+        target.configure(_provider(), use_keychain=False, use_env=True, log=lambda _: None)
+    assert catalog.read_text() == "previous catalog"
+    assert not cfg.exists()
+
+
+def test_codex_switch_to_plain_model_clears_managed_reasoning(tmp_path):
+    cfg = tmp_path / "config.toml"
+    target = CodexTarget(cfg)
+    plain = _provider(models=[ModelConfig(name="plain")])
+    with mock.patch("byop.core.targets.codex.kc.ensure_key"):
+        target.configure(_provider(), use_keychain=False, use_env=True, log=lambda _: None)
+        target.configure(plain, use_keychain=False, use_env=True, log=lambda _: None)
+    data = tomllib.loads(cfg.read_text())
+    assert data["model"] == "plain"
+    assert "model_reasoning_effort" not in data
+    assert "model_catalog_json" not in data

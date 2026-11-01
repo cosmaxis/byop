@@ -25,7 +25,7 @@ def test_looks_like_provider_paste_accepts_multiline_json():
 
 
 def test_looks_like_provider_paste_rejects_single_line():
-    assert looks_like_provider_paste("HyberOrbit") is False
+    assert looks_like_provider_paste("Cosmaxis") is False
     assert looks_like_provider_paste("https://api.example.com/v1") is False
 
 
@@ -41,7 +41,7 @@ def test_looks_like_provider_paste_rejects_non_json_garbage():
 
 def test_parse_provider_paste_round_trip():
     text = json.dumps({
-        "provider_name": "HyberOrbit",
+        "provider_name": "Cosmaxis",
         "api_url": "https://api.example.com/v1",
         "api_key": "sk-12345678",
         "models": [
@@ -50,7 +50,7 @@ def test_parse_provider_paste_round_trip():
     })
     cfg, missing = parse_provider_paste(text)
     assert isinstance(cfg, ProviderConfig)
-    assert cfg.provider_name == "HyberOrbit"
+    assert cfg.provider_name == "Cosmaxis"
     assert cfg.normalized_api_url() == "https://api.example.com/v1"
     assert cfg.api_key == "sk-12345678"
     assert len(cfg.models) == 1
@@ -179,7 +179,7 @@ def test_parse_provider_paste_accepts_jsonc_line_comments():
     text = (
         '{\n'
         '  // provider name\n'
-        '  "provider_name": "HyberOrbit",\n'
+        '  "provider_name": "Cosmaxis",\n'
         '  "api_url": "https://api.example.com/v1",\n'
         '  "api_key": "sk-12345678",\n'
         '  "models": [{"name": "hy3"}]\n'
@@ -187,7 +187,7 @@ def test_parse_provider_paste_accepts_jsonc_line_comments():
     )
     cfg, missing = parse_provider_paste(text)
     assert missing == []
-    assert cfg.provider_name == "HyberOrbit"
+    assert cfg.provider_name == "Cosmaxis"
 
 
 def test_parse_provider_paste_accepts_jsonc_block_comments():

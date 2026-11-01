@@ -58,6 +58,20 @@ def test_resolve_no_collision_non_interactive_uses_target_default():
     )
 
 
+def test_resolve_no_collision_interactive_uses_target_default():
+    # Interactive run against an unconfigured target must not crash or prompt.
+    assert (
+        resolve_conflict_action("zed", has_collision=False,
+                                 interactive=True, conflict_flag=None)
+        == ConflictAction.REPLACE
+    )
+    assert (
+        resolve_conflict_action("opencode", has_collision=False,
+                                 interactive=True, conflict_flag=None)
+        == ConflictAction.APPEND
+    )
+
+
 def test_resolve_no_collision_honors_explicit_flag():
     # Even without a collision, an explicit --conflict flag wins.
     assert (
@@ -115,10 +129,10 @@ def test_resolve_invalid_flag_raises():
 
 
 def test_supports_append_only_for_multi_provider_targets():
-    # py.dev and omp store many providers; zed/claude have one.
     assert supports_append("py") is True
     assert supports_append("omp") is True
+    assert supports_append("opencode") is True
     assert supports_append("zed") is False
     assert supports_append("claude") is False
+    assert supports_append("warp") is False
     assert supports_append("unknown") is False
-

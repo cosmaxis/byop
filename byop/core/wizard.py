@@ -1,215 +1,197 @@
-"""Interactive wizard that collects provider info and builds a ProviderConfig."""
+"""Interactive wizard that collects provider info with progressive disclosure."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from . import default_model_capabilities, prompt
 from .config import ModelConfig, ProviderConfig
-from .paste import REQUIRED_KEYS, looks_like_provider_paste, parse_provider_paste
+from .paste import looks_like_provider_paste, parse_provider_paste
+
+_REASONING_OPTIONS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+_CAPABILITY_OPTIONS = [
+    ("Image input", "images"),
+    ("Interleaved reasoning", "interleaved_reasoning"),
+    ("Legacy max_tokens field", "max_tokens_parameter"),
+]
+_KEY_STORAGE_OPTIONS = [
+    "macOS Keychain",
+    "Keychain + shell env",
+    "Shell env only (plaintext)",
+]
+_ZED_ROLES = [
+    ("Default agent", "set_default_agent"),
+    ("Inline assistant", "set_inline_assistant"),
+    ("Git commit messages", "set_commit_message"),
+    ("Thread summaries", "set_thread_summary"),
+    ("Edit predictions", "use_edit_predictions"),
+]
 
 
-def _ask_models(provider_display: str) -> list[ModelConfig]:
-    models: list[ModelConfig] = []
-    prompt.header("Models")
-    prompt.info(
-        "Configure one or more models. The first model becomes the default "
-        "for the agent and inline assistant."
+def _customize_model(model: ModelConfig) -> ModelConfig:
+    prefix = f"{model.name} · "
+    display = prompt.ask(
+        f"{prefix}Display name",
+        default=model.display_name or "",
+        allow_empty=True,
+        hint="optional",
     )
+    max_tokens = prompt.ask_int(f"{prefix}Context window", default=model.max_tokens)
+    max_out = prompt.ask_int(f"{prefix}Max output tokens", default=model.max_output_tokens)
+    cur_reasoning = model.reasoning_effort or "off"
+    r_idx = _REASONING_OPTIONS.index(cur_reasoning) if cur_reasoning in _REASONING_OPTIONS else 0
+    chosen_reasoning = prompt.choose(
+        f"{prefix}Reasoning effort",
+        _REASONING_OPTIONS,
+        default_index=r_idx,
+    )
+    reasoning_value = None if chosen_reasoning == "off" else chosen_reasoning
+
+    caps = {**default_model_capabilities(), **model.capabilities}
+    cap_defaults = [i for i, (_, key) in enumerate(_CAPABILITY_OPTIONS) if caps.get(key)]
+    chosen_caps = set(
+        prompt.select_many(
+            f"{prefix}Capabilities",
+            [label for label, _ in _CAPABILITY_OPTIONS],
+            defaults=cap_defaults,
+        )
+    )
+    for i, (_, key) in enumerate(_CAPABILITY_OPTIONS):
+        caps[key] = i in chosen_caps
+
+    return ModelConfig(
+        name=model.name,
+        display_name=display or None,
+        max_tokens=max_tokens,
+        max_output_tokens=max_out,
+        reasoning_effort=reasoning_value,
+        capabilities=caps,
+    )
+
+
+def _ask_models(existing: list[ModelConfig] | None = None) -> list[ModelConfig]:
+    existing_by_name = {m.name: m for m in (existing or [])}
+    default_str = ", ".join(existing_by_name.keys())
     while True:
-        name = prompt.ask("Model ID (sent to the API, e.g. 'hy3')")
-        if not name:
-            if models:
-                break
-            prompt.warn("At least one model is required.")
-            continue
-
-        display = prompt.ask(
-            "Display name (blank to reuse model ID)", default="", allow_empty=True
+        raw = prompt.ask(
+            "Models",
+            default=default_str,
+            hint="comma-separated, first is default",
         )
-        max_tokens = prompt.ask_int("Context window (max_tokens)", default=128000)
-        max_out = prompt.ask_int(
-            "Max output tokens", default=32000
-        )
-        reasoning: str = prompt.ask(
-            "Reasoning effort (none/minimal/low/medium/high/xhigh/max, blank=off)",
-            default="",
-            allow_empty=True,
-        )
-        reasoning_value: str | None = reasoning or None
-        caps = default_model_capabilities()
-        if prompt.confirm("Supports image input?", default=False):
-            caps["images"] = True
-        if prompt.confirm("Streams thinking in a reasoning_content field?",
-                          default=False):
-            caps["interleaved_reasoning"] = True
-        if prompt.confirm("Expects max_tokens (not max_completion_tokens)?",
-                          default=False):
-            caps["max_tokens_parameter"] = True
-
-        models.append(
-            ModelConfig(
-                name=name,
-                display_name=display or None,
-                max_tokens=max_tokens,
-                max_output_tokens=max_out,
-                reasoning_effort=reasoning_value,
-                capabilities=caps,
-            )
-        )
-        if not prompt.confirm("Add another model?", default=False):
+        names = list(dict.fromkeys(part.strip() for part in raw.split(",") if part.strip()))
+        if names:
             break
+        prompt.warn("Enter at least one model ID.")
+
+    models = [
+        existing_by_name[name]
+        if name in existing_by_name
+        else ModelConfig(name=name, capabilities=default_model_capabilities())
+        for name in names
+    ]
+    if prompt.confirm("Advanced model options?", default=False):
+        models = [_customize_model(m) for m in models]
     return models
 
 
 def run_wizard(prefill: ProviderConfig | None = None) -> tuple[ProviderConfig, dict]:
-    """Drive the interactive prompts.
-
-    When ``prefill`` is supplied (typically from a saved profile), the wizard
-    pre-fills provider/api_url/models and only prompts for fields the user
-    wants to override. Returns the configured :class:`ProviderConfig` and a
-    dict with the chosen key-storage preferences (``use_keychain`` /
-    ``use_env``).
-    """
-
-    prompt.header("byop — Custom LLM provider setup")
-    prompt.info(
-        "This wizard installs/upgrades the supported AI coding tools and wires "
-        "a custom OpenAI-compatible provider into them."
-    )
-
-    # First prompt: paste JSON or press Enter to fill in fields. We try to
-    # detect a paste heuristically (multi-line, parseable JSON), and then only
-    # ask for fields the paste didn't supply.
+    """Collect provider configuration interactively with minimal prompts."""
     pasted_prefill: ProviderConfig | None = None
     missing: list[str] = []
-    pasted = prompt.ask(
-        "Paste provider JSON (or press Enter to fill in fields one at a time)",
-        default="",
-        allow_empty=True,
-    )
-    if pasted and looks_like_provider_paste(pasted):
-        try:
-            pasted_prefill, missing = parse_provider_paste(pasted)
-        except ValueError as exc:
-            prompt.warn(f"Could not parse pasted JSON ({exc}) — "
-                        f"falling back to per-field prompts.")
-            pasted_prefill = None
-            missing = list(REQUIRED_KEYS)
 
-    # Determine which fields are "known" from a paste. A paste that supplies
-    # all fields short-circuits the per-field prompts entirely.
+    default_name = prefill.provider_name if prefill and prefill.provider_name else ""
+    first = prompt.ask(
+        "Provider name",
+        default=default_name,
+        hint="" if default_name else "or paste JSON",
+        allow_paste=True,
+    )
+    if first.lstrip().startswith("{"):
+        if looks_like_provider_paste(first):
+            try:
+                pasted_prefill, missing = parse_provider_paste(first)
+                prefill = pasted_prefill
+            except ValueError:
+                prompt.warn("Invalid provider JSON — entering fields manually.")
+                first = ""
+        else:
+            prompt.warn("Could not parse pasted JSON — entering fields manually.")
+            first = ""
     if pasted_prefill is not None:
-        prefill = pasted_prefill
-
-    def _have(field: str) -> bool:
-        if pasted_prefill is not None:
-            return field not in missing
-        # Saved-profile prefill: every field is "known" (api_key may be empty
-        # when stored as a keychain reference, so we always re-prompt for it).
-        return prefill is not None and field != "api_key"
-
-    def _present(field: str) -> bool:
-        """True when prefill has a non-empty value for this field."""
-        if not _have(field) or prefill is None:
-            return False
-        return bool(getattr(prefill, field, None))
-
-    if prefill is not None and _present("provider_name"):
-        if pasted_prefill is not None:
-            # Complete paste: use values directly, no re-confirmation.
-            provider_name = prefill.provider_name
-        else:
-            # Saved-profile prefill: confirm so the user can override.
-            prompt.info(f"  Provider name: {prefill.provider_name}")
-            provider_name = prompt.ask(
-                "Provider name (Enter to keep)",
-                default=prefill.provider_name,
-            )
-    else:
-        provider_name = prompt.ask("Provider name (e.g. 'HyberOrbit')")
-
-    if prefill is not None and _present("api_url"):
-        if pasted_prefill is not None:
-            api_url = prefill.api_url
-        else:
-            prompt.info(f"  API URL: {prefill.api_url}")
-            api_url = prompt.ask(
-                "API base URL (Enter to keep)", default=prefill.api_url
-            )
-    else:
-        api_url = prompt.ask(
-            "API base URL (e.g. 'https://api.example.com/v1')"
+        provider_name = (
+            pasted_prefill.provider_name
+            if "provider_name" not in missing
+            else prompt.ask("Provider name")
         )
-
-    # api_key: only ask when missing. For a complete paste the user already
-    # typed it once; for a saved profile we treat the stored secret as
-    # authoritative (the user can rotate via `byop profile edit`).
-    if prefill is not None and _present("api_key") and pasted_prefill is not None:
-        api_key = prefill.api_key
-    elif prefill is not None and _present("api_key"):
-        # Saved profile — re-prompt so we don't echo the secret.
-        prompt.info("  API key: (loaded from keychain — press Enter to keep)")
-        api_key = prompt.ask_secret("API key")
+        api_url = (
+            pasted_prefill.api_url
+            if "api_url" not in missing
+            else prompt.ask("API URL", hint="https://api.example.com/v1")
+        )
+        api_key = (
+            pasted_prefill.api_key
+            if "api_key" not in missing
+            else prompt.ask_secret("API key")
+        )
+        models = (
+            list(pasted_prefill.models)
+            if "models" not in missing and pasted_prefill.models
+            else _ask_models()
+        )
     else:
-        api_key = prompt.ask_secret("API key")
-
-    if prefill is not None and _present("models") and prefill.models:
-        if pasted_prefill is not None:
-            models = list(prefill.models)
-        else:
-            prompt.info(
-                f"  Models: {', '.join(m.name for m in prefill.models)}"
+        provider_name = first or prompt.ask("Provider name", default=default_name)
+        default_url = prefill.api_url if prefill else ""
+        api_url = prompt.ask(
+            "API URL",
+            default=default_url,
+            hint="" if default_url else "https://api.example.com/v1",
+        )
+        if prefill is not None and prefill.api_key:
+            api_key = (
+                prompt.ask_secret(
+                    "API key",
+                    hint="Enter to keep stored key",
+                    allow_empty=True,
+                )
+                or prefill.api_key
             )
-            if prompt.confirm("Reconfigure models?", default=False):
-                models = _ask_models(provider_name)
-            else:
-                models = list(prefill.models)
-    else:
-        models = _ask_models(provider_name)
+        else:
+            api_key = prompt.ask_secret("API key")
+        models = _ask_models(prefill.models if prefill else None)
 
-    prompt.header("Feature wiring")
-    prompt.info(
-        "Zed can use this provider for different AI features. The first "
-        "model is used where a single model is required."
-    )
-    set_default = prompt.confirm(
-        "Set as the default Agent model?",
-        default=(prefill.set_default_agent if prefill else True),
-    )
-    set_inline = prompt.confirm(
-        "Set as the Inline Assistant model?",
-        default=(prefill.set_inline_assistant if prefill else True),
-    )
-    set_commit = prompt.confirm(
-        "Use for Git commit messages?",
-        default=(prefill.set_commit_message if prefill else False),
-    )
-    set_summary = prompt.confirm(
-        "Use for thread summaries?",
-        default=(prefill.set_thread_summary if prefill else False),
-    )
-    use_edit = prompt.confirm(
-        "Enable Edit Predictions (autocomplete) with this provider?",
-        default=(prefill.use_edit_predictions if prefill else False),
-    )
-
-    prompt.header("API key storage")
-    use_keychain = prompt.confirm(
-        "Store key in macOS login keychain? (recommended)", default=True
-    )
-    use_env = prompt.confirm(
-        "Also export key as an environment variable in your shell profile?",
-        default=not use_keychain,
-    )
+    storage = prompt.choose("Key storage", _KEY_STORAGE_OPTIONS)
+    use_keychain = storage != "Shell env only (plaintext)"
+    use_env = storage != "macOS Keychain"
 
     provider = ProviderConfig(
         provider_name=provider_name,
         api_url=api_url,
         api_key=api_key,
         models=models,
-        set_default_agent=set_default,
-        set_inline_assistant=set_inline,
-        set_commit_message=set_commit,
-        set_thread_summary=set_summary,
-        use_edit_predictions=use_edit,
+        set_default_agent=prefill.set_default_agent if prefill else True,
+        set_inline_assistant=prefill.set_inline_assistant if prefill else True,
+        set_commit_message=prefill.set_commit_message if prefill else False,
+        set_thread_summary=prefill.set_thread_summary if prefill else False,
+        use_edit_predictions=prefill.use_edit_predictions if prefill else False,
     )
     return provider, {"use_keychain": use_keychain, "use_env": use_env}
+
+
+def configure_zed_features(provider: ProviderConfig) -> ProviderConfig:
+    """Ask about Zed-specific roles in one multi-select checklist."""
+    defaults = [i for i, (_, attr) in enumerate(_ZED_ROLES) if getattr(provider, attr)]
+    chosen = set(
+        prompt.select_many(
+            "Zed roles",
+            [label for label, _ in _ZED_ROLES],
+            defaults=defaults,
+        )
+    )
+    return replace(
+        provider,
+        set_default_agent=0 in chosen,
+        set_inline_assistant=1 in chosen,
+        set_commit_message=2 in chosen,
+        set_thread_summary=3 in chosen,
+        use_edit_predictions=4 in chosen,
+    )

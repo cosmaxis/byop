@@ -1,8 +1,6 @@
 # byop
 
-[![CI](https://github.com/thinhngotony/byop/actions/workflows/ci.yml/badge.svg)](https://github.com/thinhngotony/byop/actions/workflows/ci.yml)
-
-[![CI](https://github.com/thinhngotony/byop/actions/workflows/ci.yml/badge.svg)](https://github.com/thinhngotony/byop/actions/workflows/ci.yml)
+[![CI](https://github.com/Cosmaxis/byop/actions/workflows/ci.yml/badge.svg)](https://github.com/Cosmaxis/byop/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -24,8 +22,8 @@ writes your secret to disk in plaintext.
 
 - **Multi-target** — detects which AI coding tools are installed and asks which
   to configure. Missing apps can be installed for you on the spot.
-- **Always up to date** — upgrades each selected app to the latest stable
-  release before configuring.
+- **Opt-in installs** — asks before installing missing tools in interactive
+  setup; explicit `--target` selections are intended for scripts.
 - **One provider, many tools** — configure Zed and py.dev from the same input.
 - **Non-destructive** — merges into each app's config, preserving your existing
   settings and comments.
@@ -44,32 +42,58 @@ writes your secret to disk in plaintext.
 | --- | --- | --- |
 | `zed` (Zed) | `~/.config/zed/settings.json` | Homebrew cask / direct download |
 | `py` (py.dev / Pi) | `~/.pi/agent/models.json` | Homebrew cask |
-| `omp` (oh-my-pi / Oh My Pi) | `~/.omp/agent/models.json` | `brew install can1357/tap/omp` / `curl -fsSL https://omp.sh/install | sh` |
+| `omp` (oh-my-pi / Oh My Pi) | `~/.omp/agent/models.yml` | `brew install can1357/tap/omp` / `curl -fsSL https://omp.sh/install | sh` |
 | `claude` (Claude Code) | `~/.claude/settings.json` | `brew install --cask claude-code` / `npm i -g @anthropic-ai/claude-code` / `curl -fsSL https://claude.ai/install.sh | sh` |
 | `codex` (Codex desktop / CLI) | `~/.codex/config.toml` | Install from https://openai.com/codex/ |
-| `warp` (Warp) | `~/.warp/settings.toml` (read-only) | Homebrew cask / https://www.warp.dev/download |
+| `opencode` (OpenCode) | `~/.config/opencode/opencode.json` | `brew install --cask opencode` / `curl -fsSL https://opencode.ai/install | sh` |
+| `warp` (Warp) | `~/.warp/settings.toml` + macOS Keychain | Homebrew cask / official DMG download |
 
-Warp support currently prints exact values for manual entry in Warp Settings > AI > Custom inference endpoint. Warp's endpoint TOML schema is undocumented and unverified, so byop never guesses keys or writes the settings file; API keys are redacted from output. Warp requires a public HTTPS endpoint (local/private URLs are rejected). `--conflict replace` and `skip` are accepted; `append` is rejected because Warp has one active endpoint. Unattended secure-storage automation is not supported: Warp's private `AiApiKeys` blob has no documented external write contract. Tracking request: [warpdotdev/warp#14721](https://github.com/warpdotdev/warp/issues/14721).
+### Claude Code & OpenCode
+
+- **Claude Code (`--target claude`)** configures `apiKeyHelper` (reading from the macOS login keychain), `env.ANTHROPIC_BASE_URL` (automatically stripping a trailing `/v1` segment because Claude Code posts to `$ANTHROPIC_BASE_URL/v1/messages`), and `model` in `~/.claude/settings.json`. Your upstream gateway **must** expose an Anthropic Messages-compatible `/v1/messages` endpoint (e.g. LiteLLM, Bifrost, OpenRouter).
+- **OpenCode (`--target opencode`)** writes `{env:<PROVIDER>_API_KEY}` under `provider.<Name>.options.apiKey` in `~/.config/opencode/opencode.json` and exports that variable dynamically from the macOS login keychain in your shell profile (`~/.zshrc`), keeping plaintext secrets off disk. Open a new terminal (or `source ~/.zshrc`) before running `opencode`.
+
+### Warp
+
+`byop --target warp` (or selecting **Warp** in the interactive checklist) installs Warp automatically if missing and configures a custom endpoint using **OpenAI Chat Completions**. Supply provider details in the wizard, or apply an existing profile with `byop apply --target warp` (add `--skip-install` to write settings without installing). Use `https://api.cosmaxis.com/v1` and model `pro` for the Cosmaxis setup verified on Warp `0.2026.10.21.08.25.02`.
+
+- The installed app's `Contents/Resources/settings_schema.json` must describe the supported endpoint/model format. Older or incompatible versions fall back to redacted manual instructions. `--no-keychain` also requires manual setup; Warp does not use a shell environment-variable reference for this credential.
+- Non-secret endpoints live in `agents.custom_endpoints`. Model UUIDs remain stable on reapply. The first model becomes the default agent model when default-agent selection is enabled. Other endpoints, permissions, settings, and comments are preserved; the first original file is backed up to `settings.toml.bak` with owner-only permissions.
+- Keys live in Warp Stable's generic-password item: service `dev.warp.Warp-Stable`, account `AiCustomEndpointKeys`, encoded as a JSON map of endpoint IDs to keys. Native Security.framework calls keep new secrets out of process arguments. Existing items are updated in place to preserve their access controls; other endpoint keys are preserved. Keychain authorization may require local interaction. The legacy `AiApiKeys` item is not modified.
+- **Save active work, fully quit Warp with Cmd-Q, then reopen it. A new tab is not enough:** Warp caches API keys in memory. Select the custom model, not Auto. `byop` never quits Warp or interrupts terminal tasks automatically.
+- Warp requires a public HTTPS endpoint. Prompts, context, endpoint URL, and key pass through **Warp's servers** before reaching your provider. See [Warp's custom endpoint documentation](https://docs.warp.dev/agents/inference/custom-inference-endpoint/).
+
+`--conflict replace` updates the matching provider, preserving other endpoints; `skip` leaves an existing matching provider and key untouched. Replacements that would leave execution profiles referencing removed models are rejected. Symlink-managed settings require manual setup rather than replacing the link. `append` remains unsupported by this target. `--dry-run`, status, and export never read or write Warp's Keychain item. Setup does not perform inference or prove upstream tool/streaming compatibility.
+
+The October 26, 2026 Cosmaxis diagnosis established that Warp's Anthropic Messages path emitted tool schemas with `required: null`, which the configured upstream rejected. The Chat Completions path passed streaming inference and a terminal-tool round trip. This is why the target uses `openai_chat_completions`, rather than assuming Anthropic or Responses compatibility from a basic API test.
 
 ## Installation
 
 ### One command (recommended)
 
 ```bash
-curl -sfS https://byop.hyberorbit.com/install | sh
+curl -sfS https://byop.cosmaxis.com/install | sh
 ```
 
-This installs the `byop` command (via [pipx](https://pipx.pypa.io) when
-available, pinned to the latest release). Requires macOS and Python 3.11+;
-Homebrew is used to install any missing prerequisites.
+This installs `byop` and its declared Python dependencies in an isolated
+[pipx](https://pipx.pypa.io) environment, pinned to the latest release. On
+macOS, the installer uses Homebrew to install missing Python 3.11+, Git, and
+pipx. If Homebrew is missing, it installs that first and may request your
+administrator password. Network access and the macOS system tools (including
+`curl`) are required.
+
+When installation finishes, run `byop` and follow the prompts to enter your
+provider and select tools. If `byop` is not on your PATH yet, use the full
+command printed by the installer, or run `pipx ensurepath` and open a new
+terminal.
 
 > Prefer to read before you run? Inspect the script first:
-> `curl -sfS https://byop.hyberorbit.com/install`
+> `curl -sfS https://byop.cosmaxis.com/install`
 
 ### From source
 
 ```bash
-git clone https://github.com/thinhngotony/byop.git
+git clone https://github.com/Cosmaxis/byop.git
 cd byop
 python3 -m pip install -e ".[dev]"      # includes test/lint/type tooling
 ```
@@ -77,7 +101,7 @@ python3 -m pip install -e ".[dev]"      # includes test/lint/type tooling
 ### With pipx (from GitHub)
 
 ```bash
-pipx install "git+https://github.com/thinhngotony/byop.git"
+pipx install "git+https://github.com/Cosmaxis/byop.git"
 ```
 
 ## Usage
@@ -88,30 +112,26 @@ pipx install "git+https://github.com/thinhngotony/byop.git"
 byop
 ```
 
-You are guided through provider details, then `byop` detects your installed
-tools and asks which to configure:
+Use ↑/↓ and Enter to navigate menus; completed steps collapse into a single summary line. When choosing tools, move with ↑/↓, toggle with Space (or press `a` to toggle all), and confirm with Enter. Selecting an uninstalled tool prompts once to install and configure it automatically. Escape or Ctrl-C cancels.
 
-```
-=== byop — Custom LLM provider setup ===
-› Provider name (e.g. 'MyProvider'): MyProvider
-› API base URL (e.g. 'https://api.example.com/v1'): https://api.example.com/v1
-› API key: ********************************
-...
+Set `BYOP_PLAIN=1` for line-based numbered menus, including in a terminal.
+Piped input and terminals too small for the checklist use this fallback
+automatically.
 
-=== Target applications ===
-  - Zed (installed)
-  - py.dev (Pi) (installed)
-› Configure Zed? [y/n] (y):
-› Configure py.dev (Pi)? [y/n] (y):
-```
+**Add provider** uses the provider name as the saved profile name. Existing
+profiles keep their names. Zed-specific questions appear only when setting up
+Zed. **Switch provider** selects a profile without changing tool settings.
+
+Non-interactive runs without `--target` configure detected apps only. Pass an
+explicit `--target` to select a missing app; with `--skip-install`, byop writes
+its configuration without installing it.
 
 ### Non-interactive (scripting / CI)
-```
 
 | Flag | Purpose |
 | --- | --- |
 | `--target {zed,py,omp,claude,codex,opencode,warp}` | Configure only the named target(s); repeatable. Defaults to all detected apps. |
-| `--conflict {replace,skip,append,prompt}` | What to do when a provider with the same name already exists on a target. Default: prompt interactively; `replace` for zed/claude/codex, `append` for py/omp/opencode in non-interactive mode. |
+| `--conflict {replace,skip,append,prompt}` | What to do when a provider with the same name already exists on a target. Default: prompt interactively; `replace` for zed/claude/codex/warp, `append` for py/omp/opencode in non-interactive mode. |
 | `--settings PATH` | Override the Zed settings path (default `~/.config/zed/settings.json`). |
 | `--dry-run` | Print the configuration fragments that *would* be written; change nothing. |
 | `--no-keychain` | Skip the macOS keychain (falls back to an embedded key — less secure). |
@@ -137,7 +157,7 @@ copying a fragment into another tool:
 ```bash
 byop --export-config                            # all targets, all providers
 byop --export-config --target zed               # just Zed
-byop --export-config --export-provider HyberOrbit  # only that name
+byop --export-config --export-provider Cosmaxis  # only that name
 ```
 
 Output shape (one key per target, `config_path` shows where the target would
@@ -147,7 +167,7 @@ write):
 {
   "zed": {
     "config_path": "/Users/you/.config/zed/settings.json",
-    "providers": { "HyberOrbit": { "api_url": "...", "available_models": [...] } },
+    "providers": { "Cosmaxis": { "api_url": "...", "available_models": [...] } },
     "agent": { "default_model": { ... } },
     "edit_predictions": { ... }
   },
@@ -163,7 +183,7 @@ wizard:
 
 | Command | Purpose |
 | --- | --- |
-| `byop` | Status dashboard (or first-run wizard when no profile exists). |
+| `byop` | Interactive menu for tool setup and provider profiles. |
 | `byop status` | Read-only dashboard: active profile, target state, drift. |
 | `byop apply [flags]` | Sync the active profile to one or more targets. |
 | `byop doctor` | Detect drift between the profile and each target's settings. |
@@ -193,8 +213,10 @@ model_provider = "MyProvider"
 name = "MyProvider"
 base_url = "https://api.example.com/v1"
 wire_api = "responses"
-# byop's default keychain mode writes a command-backed auth table here.
-env_key = "MYPROVIDER_API_KEY"
+
+[model_providers.MyProvider.auth]
+command = "security"
+args = ["find-internet-password", "-s", "https://api.example.com/v1", "-a", "Bearer", "-w"]
 ```
 
 Codex custom providers support the Responses API only. The selected provider is
@@ -245,25 +267,14 @@ keychain **at request time**, so the key is never stored in `models.json`. If no
 keychain entry exists, `byop` falls back to embedding the key inline (with a
 warning).
 
-**Codex desktop / CLI** (`~/.codex/config.toml`):
-
-```toml
-model = "my-model"
-model_provider = "MyProvider"
-
-[model_providers.MyProvider]
-name = "MyProvider"
-base_url = "https://api.example.com/v1"
-wire_api = "responses"
-env_key = "MYPROVIDER_API_KEY"
-```
 
 Codex custom providers must use the OpenAI Responses API (`wire_api =
 "responses"`). With the default keychain mode, byop stores the secret in the
 macOS keychain and configures Codex's command-backed `auth` lookup, so the
-secret is not written to `config.toml`. With `--env-key` / `--no-keychain`,
-Codex references the generated environment variable name instead; byop does
-not write the secret into the Codex config. Codex supports one active provider,
+secret is not written to `config.toml`. With `--no-keychain`, Codex references
+the generated environment variable name instead; byop does not write the secret
+into the Codex config. `--env-key` additionally exports the key in the shell
+profile. Codex supports one active provider,
 so `append` is not available for this target.
 
 The command-backed keychain lookup uses macOS's `security` command at request
@@ -278,8 +289,8 @@ ensure the keychain entry is available to the Codex process.
 - **py.dev**: the key is read from that same keychain entry via a `!command`
   reference, so `models.json` contains no secret.
 - **Codex**: the default configuration uses a command-backed `auth` lookup
-  against that keychain entry; `--no-keychain` / `--env-key` uses an `env_key`
-  reference instead. `config.toml` contains neither form of the secret.
+  against that keychain entry; `--no-keychain` uses an `env_key` reference.
+  `config.toml` contains neither form of the secret.
 - The `--env-key` option appends a single `export` line to `~/.zshrc` (or
   another detected profile) and refuses to duplicate it on re-runs.
 - No credentials are sent over the network by `byop` itself; it only writes
@@ -296,11 +307,11 @@ what to do:
   entry is still ensured.
 - **append** — write under `<ProviderName>_2`, `<ProviderName>_3`, … so the new
   provider lives alongside the existing one. Only available for targets that
-  support multiple concurrent providers (py.dev, omp).
+  support multiple concurrent providers (py.dev, omp, opencode).
 
 For non-interactive / scripted runs, pass `--conflict replace|skip|append`
 to skip the prompt. The default in non-interactive mode is `replace` for
-Zed/Claude Code and `append` for py.dev/omp.
+Zed/Claude Code/Warp and `append` for py.dev/omp/OpenCode.
 
 The wizard's first prompt also accepts a pasted JSON block. If your provider
 description is already in a file, you can pipe it: `pbpaste | xargs -0 byop`

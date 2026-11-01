@@ -1,39 +1,27 @@
 """Codex target: configure a custom OpenAI Responses API provider.
 
-Codex (https://developers.openai.com/codex) stores user configuration in
-``~/.codex/config.toml``. A custom provider is declared under
-``[model_providers.<name>]`` and selected via ``model`` /
-``model_provider``. Reasoning effort (``low`` / ``medium`` / ``high`` /
-``xhigh``) is normally gated by the built-in model catalogue; custom models
-therefore need an explicit catalogue entry to expose thinking-effort choices
-in the TUI (see ``model_catalog_json`` + ``model_supports_reasoning_summaries``).
-
-This target is intentionally conservative: it deep-merges into the existing
-``config.toml`` (preserving unrelated sections like ``[features]``,
-``[mcp_servers]`` and other providers), generates a per-provider catalogue
-that mirrors OpenAI's ``models_cache.json`` schema, and never writes secrets
-to disk. Secrets stay in the macOS keychain and are referenced via a
-command-backed ``[model_providers.<name>.auth]`` table at request time.
+Codex stores user configuration in ``~/.codex/config.toml``. A custom provider
+uses the Responses API and keychain command authentication or an environment
+reference. Model catalog entries inherit the installed Codex client's bundled
+metadata so byop does not replace its system instructions with invented ones.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit
 
-import tomli_w
-
-# tomllib is Python 3.11+; fall back to tomli on older interpreters.
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover
-    import tomli as tomllib  # type: ignore[no-redef]
+import tomlkit
 
 from .. import keychain as kc
 from ..config import ModelConfig, ProviderConfig
+from ..settings import atomic_write
 
 DEFAULT_CONFIG_PATH = Path.home() / ".codex" / "config.toml"
 DEFAULT_CATALOG_DIR = Path.home() / ".codex" / "byop-catalogs"
@@ -49,104 +37,31 @@ _CATALOG_REASONING_LEVELS = [
     {"effort": "ultra", "description": "Maximum reasoning with automatic task delegation"},
 ]
 
-# Minimal but complete model entry that satisfies Codex's strict catalog
-# validation (mirrors the shape of ``models_cache.json`` entries).  Values are
-# chosen to be sensible defaults for an OpenAI-compatible proxy; per-model
-# fields like ``slug`` / ``priority`` are overwritten at generation time.
-_CATALOG_BASE: dict = {
-    "shell_type": "unified_exec",
-    "visibility": "list",
-    "supported_in_api": True,
-    "additional_speed_tiers": [],
-    "service_tiers": [],
-    "availability_nux": None,
-    "upgrade": None,
-    "model_messages": {
-        "instructions_template": (
-            "You are Codex, a coding agent based on GPT-5. You and the user "
-            "share one workspace, and your job is to collaborate with them "
-            "until their goal is genuinely handled."
-        ),
-        "instructions_variables": None,
-        "approvals": None,
-        "collaboration_modes": None,
-        "auto_review": None,
-        "permissions": None,
-        "multi_agent": None,
-        "token_budget": {
-            "enabled": False,
-            "use_history_notes_extension": False,
-            "reminder_threshold_tokens": 6144,
-            "reminder_message_template": "",
-            "guidance_message": "",
-            "auto_compact_fallback_prompt": "",
-            "auto_compact_fallback_buffer_tokens": 16384,
-        },
-    },
-    "include_skills_usage_instructions": False,
-    "include_plugin_usage_instructions": True,
-    "include_apps_usage_instructions": True,
-    "default_reasoning_summary": "none",
-    "support_verbosity": True,
-    "default_verbosity": "low",
-    "apply_patch_tool_type": "freeform",
-    "web_search_tool_type": "text_and_image",
-    "truncation_policy": {"mode": "tokens", "limit": 10000},
-    "supports_image_detail_original": True,
-    "context_window": 272000,
-    "max_context_window": 272000,
-    "comp_hash": "byop-1",
-    "effective_context_window_percent": 95,
-    "experimental_supported_tools": [],
-    "input_modalities": ["text", "image"],
-    "supports_search_tool": True,
-    "use_responses_lite": True,
-    "node_repl_auto_review_required": False,
-    "node_repl_disabled": False,
-    "tool_mode": "code_mode_only",
-    "multi_agent_version": "v2",
-}
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:  # pragma: no cover
     return subprocess.run(cmd, capture_output=True, text=True, check=False)
 
 
-def _deep_merge(base: dict, overlay: dict) -> dict:
-    """Recursively merge ``overlay`` into ``base`` (in place) and return it."""
-    for key, value in overlay.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            base[key] = _deep_merge(dict(base[key]), value)
-        else:
-            base[key] = value
-    return base
-
-
 def _catalog_path_for(provider_name: str, catalog_dir: Path = DEFAULT_CATALOG_DIR) -> Path:
-    # Sanitise provider name for a filename; Codex itself restricts the name to
-    # ``^[A-Za-z0-9 _.\-]+$`` so this is mostly defensive.
-    safe = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in provider_name).strip("_")
-    return catalog_dir / f"{safe or 'provider'}.json"
+    # Percent encoding is reversible, unlike replacing spaces and dots with underscores.
+    return catalog_dir / f"{quote(provider_name, safe='-_.')}.json"
 
 
-def _catalog_entry(model: ModelConfig, priority: int) -> dict:
-    entry = dict(_CATALOG_BASE)
-    # Per-model overrides.
+def _catalog_entry(model: ModelConfig, priority: int, template: dict) -> dict:
+    entry = dict(template)
     entry["slug"] = model.name
     entry["display_name"] = model.display_name or model.name
-    entry["description"] = f"{entry['display_name']} via {model.name}"
-    # Default reasoning level is the model's configured effort, falling back to
-    # medium for models that declare none/minimal.
-    default_effort = model.reasoning_effort if model.reasoning_effort not in (None, "none", "minimal") else "medium"
-    # Ensure the default is one of the supported levels; otherwise fall back.
-    if default_effort not in {lvl["effort"] for lvl in _CATALOG_REASONING_LEVELS}:
+    entry["description"] = f"{entry['display_name']} via byop"
+    default_effort = model.reasoning_effort or "medium"
+    if default_effort not in {level["effort"] for level in _CATALOG_REASONING_LEVELS}:
         default_effort = "medium"
     entry["default_reasoning_level"] = default_effort
     entry["supported_reasoning_levels"] = list(_CATALOG_REASONING_LEVELS)
     entry["priority"] = priority
     entry["context_window"] = model.max_tokens
-    entry["max_context_window"] = max(model.max_tokens, model.max_output_tokens * 4)
-    entry["description"] = f"{entry['display_name']} via byop"
+    entry["max_context_window"] = model.max_tokens
+    entry["input_modalities"] = ["text", "image"] if model.capabilities.get("images") else ["text"]
     return entry
 
 
@@ -159,29 +74,21 @@ class CodexTarget:
     def __init__(
         self,
         config_path: Path = DEFAULT_CONFIG_PATH,
-        catalog_dir: Path = DEFAULT_CATALOG_DIR,
+        catalog_dir: Path | None = None,
     ) -> None:
-        self.config_path = config_path
-        self.catalog_dir = catalog_dir
+        self.config_path = Path(config_path)
+        self.catalog_dir = catalog_dir or self.config_path.parent / "byop-catalogs"
 
     # ------------------------------------------------------------------
     # Discovery
     # ------------------------------------------------------------------
     def is_installed(self) -> bool:
-        if self.config_path.parent.exists():
-            return True
-        if shutil.which("codex") is not None:
-            return True
-        # Desktop app ships the CLI inside ChatGPT.app as well as a dedicated
-        # Codex.app on some installations.
-        for p in (
-            Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
-            Path("/Applications/Codex.app"),
-            Path("/Applications/ChatGPT.app"),
-        ):
-            if p.exists():
-                return True
-        return False
+        return (
+            shutil.which("codex") is not None
+            or Path("/Applications/Codex.app").exists()
+            or (Path.home() / "Applications" / "Codex.app").exists()
+            or Path("/Applications/ChatGPT.app/Contents/Resources/codex").exists()
+        )
 
     def install(self, log: Callable[[str], None] = print) -> None:  # pragma: no cover
         if shutil.which("brew") is not None:
@@ -205,6 +112,8 @@ class CodexTarget:
         use_env: bool = False,
     ) -> dict:
         """Return the Codex TOML fragment without exposing the API key."""
+        if provider.provider_name.lower() in {"openai", "ollama", "lmstudio"}:
+            raise ValueError("Codex reserves the provider IDs openai, ollama, and lmstudio.")
         primary = provider.models[0]
         block: dict = {
             "name": provider.provider_name,
@@ -230,68 +139,57 @@ class CodexTarget:
         else:
             raise ValueError("Codex requires either keychain storage or an environment variable.")
 
-        # Top-level model selection + reasoning plumbing.  A custom catalogue is
-        # required to expose multiple models (lite/pro/max) and thinking-effort
-        # choices in the TUI; without it Codex falls back to built-in OpenAI
-        # models and silently drops ``reasoning.effort``.
-        catalog_path = _catalog_path_for(provider.provider_name, self.catalog_dir)
         has_reasoning = any(m.reasoning_effort not in (None, "none") for m in provider.models)
-
         fragment: dict = {
             "model": primary.name,
             "model_provider": provider.provider_name,
             "model_providers": {provider.provider_name: block},
         }
-        # Only set reasoning-related keys when the provider actually uses them;
-        # this keeps the config minimal for non-reasoning proxies.
-        if has_reasoning:
-            fragment["model_reasoning_effort"] = primary.reasoning_effort or "medium"
-            fragment["model_reasoning_summary"] = "auto"
-            fragment["model_verbosity"] = "medium"
-            fragment["model_supports_reasoning_summaries"] = True
-            fragment["model_catalog_json"] = str(catalog_path)
+        if primary.reasoning_effort not in (None, "none"):
+            fragment["model_reasoning_effort"] = primary.reasoning_effort
+        if has_reasoning or len(provider.models) > 1:
+            fragment["model_catalog_json"] = str(
+                _catalog_path_for(provider.provider_name, self.catalog_dir)
+            )
 
         return fragment
 
     def build_catalog(self, provider: ProviderConfig) -> dict:
-        """Build the catalogue JSON that exposes all provider models.
+        """Derive catalog entries from the installed client's own bundled metadata."""
+        executable = shutil.which("codex")
+        if executable is None:
+            candidate = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
+            executable = str(candidate) if candidate.is_file() else None
+        if executable is None:
+            raise RuntimeError("Codex CLI is required to build its model catalog; install Codex first.")
+        try:
+            with tempfile.TemporaryDirectory(prefix="byop-codex-") as temporary:
+                env = {**os.environ, "CODEX_HOME": temporary}
+                result = subprocess.run(
+                    [executable, "debug", "models", "--bundled"],
+                    cwd=temporary, env=env, capture_output=True, text=True, timeout=30, check=False,
+                )
+            if result.returncode:
+                raise RuntimeError("Codex could not provide its bundled model catalog; update Codex.")
+            bundled = json.loads(result.stdout)["models"]
+            template = next(model for model in bundled if isinstance(model, dict))
+        except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError, StopIteration) as exc:
+            raise RuntimeError("Could not read Codex's bundled model catalog; update Codex.") from exc
+        return {"models": [_catalog_entry(model, index, template) for index, model in enumerate(provider.models)]}
 
-        The catalogue mirrors ``~/.codex/models_cache.json`` so the picker shows
-        ``Lite`` / ``Pro`` / ``Max`` (or any custom names) with full
-        ``low``/``medium``/``high``/``xhigh`` effort support.
-        """
-        models = [_catalog_entry(m, i) for i, m in enumerate(provider.models)]
-        return {"models": models}
-
-    # ------------------------------------------------------------------
-    # IO helpers
-    # ------------------------------------------------------------------
     def _load(self) -> dict:
         if not self.config_path.exists():
-            return {}
+            return tomlkit.document()
         try:
-            with self.config_path.open("rb") as handle:
-                data = tomllib.load(handle)
-        except (OSError, tomllib.TOMLDecodeError) as exc:
+            return tomlkit.parse(self.config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
             raise RuntimeError(f"Could not parse {self.config_path}: {exc}") from exc
-        return data
 
     def _write(self, data: dict) -> None:
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic write to avoid truncating on crash.
-        tmp = self.config_path.with_suffix(".toml.tmp")
-        tmp.write_text(tomli_w.dumps(data), encoding="utf-8")
-        tmp.replace(self.config_path)
-
-    def _write_catalog(self, provider: ProviderConfig, *, log: Callable[[str], None] = print) -> Path:
-        catalog = self.build_catalog(provider)
-        path = _catalog_path_for(provider.provider_name, self.catalog_dir)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(catalog, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(path)
-        log(f"Wrote Codex model catalogue with {len(catalog['models'])} model(s) to {path}")
-        return path
+        # Resolve symlinks so dotfile-managed config links remain intact.
+        destination = self.config_path.resolve()
+        mode = destination.stat().st_mode & 0o777 if destination.exists() else 0o600
+        atomic_write(destination, tomlkit.dumps(data).encode(), mode)
 
     # ------------------------------------------------------------------
     # Public API
@@ -313,48 +211,67 @@ class CodexTarget:
             raise ValueError("Codex supports one active model provider; use replace or skip.")
 
         fragment = self.build_fragment(provider, use_keychain=use_keychain, use_env=use_env)
-        catalog_preview = self.build_catalog(provider)
-
         if dry_run:
             log("[dry-run] Codex would merge this config.toml fragment:")
-            log(tomli_w.dumps(fragment))
-            log("[dry-run] Codex would write this catalogue JSON to")
-            log(f"[dry-run] {fragment.get('model_catalog_json', '(no catalogue)')} :")
-            log(json.dumps(catalog_preview, indent=2))
+            log(tomlkit.dumps(fragment))
+            if "model_catalog_json" in fragment:
+                log("[dry-run] Codex would generate a catalog from its bundled model metadata.")
             return
 
-        # Ensure the secret is available via the chosen mechanism before we
-        # touch any config file, so a keychain failure is surfaced early.
-        if use_keychain or use_env:
-            kc.ensure_key(
-                server=provider.keychain_server(),
-                api_key=provider.api_key,
-                env_var=provider.env_var_name(),
-                log=log,
-                use_keychain=use_keychain,
-                use_env=use_env,
-            )
-
-        # Handle skip idempotently: only skip when the active provider *and*
-        # its URL and primary model already match (otherwise a re-run that
-        # changes the model list or URL should update the file).
+        original = self.config_path.read_bytes() if self.config_path.exists() else None
         current = self._load()
         existing_provider = current.get("model_provider")
-        if conflict_action == "skip" and existing_provider == provider.provider_name:
-            log(f"Skip: Codex already uses {provider.provider_name}.")
+        if conflict_action == "skip" and existing_provider:
+            log(f"Skip: Codex already uses {existing_provider}.")
             return
 
-        # Write catalogue first; if this fails we have not yet mutated config.toml.
-        if "model_catalog_json" in fragment:
-            self._write_catalog(provider, log=log)
+        catalog_path = Path(fragment["model_catalog_json"]) if "model_catalog_json" in fragment else None
+        catalog = self.build_catalog(provider) if catalog_path else None
+        if catalog_path and catalog_path.is_symlink():
+            raise ValueError("Codex catalog is symlink-managed; remove the link before setup.")
 
-        merged = _deep_merge(dict(current), fragment)
-        self._write(merged)
+        providers = current.setdefault("model_providers", tomlkit.table())
+        if not isinstance(providers, dict):
+            raise ValueError("Codex model_providers must be a TOML table.")
+        block = providers.setdefault(provider.provider_name, tomlkit.table())
+        if not isinstance(block, dict):
+            raise ValueError("Codex provider settings must be a TOML table.")
+        for key in ("auth", "env_key", "experimental_bearer_token", "requires_openai_auth"):
+            block.pop(key, None)
+        block.update(fragment.pop("model_providers")[provider.provider_name])
+        if "model_reasoning_effort" not in fragment:
+            current.pop("model_reasoning_effort", None)
+        previous_catalog = current.get("model_catalog_json")
+        if catalog_path is None and isinstance(previous_catalog, str):
+            if Path(previous_catalog).parent == self.catalog_dir:
+                current.pop("model_catalog_json", None)
+        current.update(fragment)
+
+        kc.ensure_key(
+            server=provider.keychain_server(),
+            api_key=provider.api_key,
+            env_var=provider.env_var_name(),
+            log=log,
+            use_keychain=use_keychain,
+            use_env=use_env,
+        )
+        old_catalog = catalog_path.read_bytes() if catalog_path and catalog_path.exists() else None
+        old_mode = catalog_path.stat().st_mode & 0o777 if old_catalog is not None and catalog_path else 0o600
+        if catalog_path and catalog is not None:
+            atomic_write(catalog_path, (json.dumps(catalog, indent=2) + "\n").encode(), old_mode)
+        try:
+            latest = self.config_path.read_bytes() if self.config_path.exists() else None
+            if latest != original:
+                raise RuntimeError("Codex settings changed during setup; retry.")
+            self._write(current)
+        except Exception:
+            if catalog_path:
+                if old_catalog is None:
+                    catalog_path.unlink(missing_ok=True)
+                else:
+                    atomic_write(catalog_path, old_catalog, old_mode)
+            raise
         log(f"Updated Codex config at {self.config_path}")
-        if use_keychain:
-            log("Codex will read the API key from the macOS keychain at request time (secure).")
-        else:
-            log(f"Codex will read the API key from ${provider.env_var_name()}.")
 
     def current_provider_names(self) -> list[str]:
         data = self._load()
@@ -367,8 +284,16 @@ class CodexTarget:
         providers: dict = {}
         all_providers = data.get("model_providers", {})
         if isinstance(name, str) and name and isinstance(all_providers, dict):
-            if name in all_providers:
-                providers[name] = all_providers[name]
+            block = all_providers.get(name)
+            if isinstance(block, dict):
+                safe = {key: block[key] for key in ("name", "wire_api", "env_key") if key in block}
+                base_url = block.get("base_url")
+                if isinstance(base_url, str):
+                    parsed = urlsplit(base_url)
+                    safe["base_url"] = urlunsplit(
+                        (parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", "")
+                    )
+                providers[name] = safe
         # Surface catalogue for completeness; not every installation uses it.
         if isinstance(data.get("model_catalog_json"), str):
             providers["_catalog"] = {"path": data["model_catalog_json"]}
