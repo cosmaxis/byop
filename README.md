@@ -52,6 +52,63 @@ writes your secret to disk in plaintext.
 - **Claude Code (`--target claude`)** configures `apiKeyHelper` (reading from the macOS login keychain), `env.ANTHROPIC_BASE_URL` (automatically stripping a trailing `/v1` segment because Claude Code posts to `$ANTHROPIC_BASE_URL/v1/messages`), and `model` in `~/.claude/settings.json`. Your upstream gateway **must** expose an Anthropic Messages-compatible `/v1/messages` endpoint (e.g. LiteLLM, Bifrost, OpenRouter).
 - **OpenCode (`--target opencode`)** writes `{env:<PROVIDER>_API_KEY}` under `provider.<Name>.options.apiKey` in `~/.config/opencode/opencode.json` and exports that variable dynamically from the macOS login keychain in your shell profile (`~/.zshrc`), keeping plaintext secrets off disk. Open a new terminal (or `source ~/.zshrc`) before running `opencode`.
 
+#### Claude gateway model metadata
+
+For Claude Code, BYOP registers the **first configured model** with
+`ANTHROPIC_CUSTOM_MODEL_OPTION`, uses its display name (or ID) as
+`ANTHROPIC_CUSTOM_MODEL_OPTION_NAME`, and sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
+and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` from its configured context/output limits.
+The wire ID stays unchanged: `pro` remains `pro`, not an impersonated Claude model.
+Existing Sonnet/Opus/Haiku mappings and unrelated settings are preserved.
+
+Set the per-model limits explicitly, for example
+`--model pro:max_tokens=128000:max_output_tokens=16000`.
+These are **operator-supplied limits**, not
+discovered capabilities; BYOP defaults to 128,000 context and 32,000 output tokens.
+For a routing combo, choose limits supported by every possible target.
+
+Restart Claude after applying. The context override is session-wide, not a
+per-model registry: review it when switching models or using different role mappings.
+It applies directly to unrecognized gateway IDs like `pro`; recognized Claude IDs,
+bare `claude-` IDs, and `[1m]` IDs have additional rules in
+[Claude's context documentation](https://code.claude.com/docs/en/model-config#correct-the-window-for-a-gateway-or-custom-model-id).
+BYOP does not disable compaction, spoof model families, grant model allowlist access,
+or infer thinking/vision support. Older Claude versions may ignore these settings;
+upgrade if `/context` does not show the configured window.
+
+#### Claude Auto-mode safety classifier
+
+The coding model and Auto-mode safety classifier are separate. Choosing `pro`
+does not guarantee that background safety checks use `pro`; Claude can call
+Sonnet separately with the same API key. A failed classifier blocks the tool,
+not necessarily the main model.
+
+Add one of these choices to your normal Claude setup invocation:
+
+```bash
+# Human approvals; avoids Auto-mode classifier requests.
+byop apply --target claude --claude-permission-mode manual
+
+# Keep automatic safety review with an explicitly selected classifier.
+byop apply --target claude --claude-permission-mode auto \
+  --claude-auto-mode-model claude-sonnet-4-6
+```
+
+Manual writes `permissions.defaultMode: "default"` (Claude's Manual value),
+not bypass mode. Auto writes `"auto"`; the classifier option writes
+`env.CLAUDE_CODE_AUTO_MODE_MODEL` and requires Claude Code 2.1.302 or later.
+Supplying only the classifier option does not enable Auto mode.
+Omitting both options preserves the existing permission mode and classifier.
+Allow/deny rules are preserved; `--conflict skip` leaves existing matching settings unchanged.
+These are per-invocation target options, not saved provider-profile fields.
+
+Restart Claude after applying. Session flags, project/managed policy, and resumed
+session state can override the user-level default. Do not turn off safety checks
+or assume a GPT-backed gateway alias is a compatible classifier: select a model
+your Claude version supports and verify gateway access, key policy, billing, and
+an actual tool safety check. Setting the option alone does not prove availability.
+See [Claude's classifier documentation](https://code.claude.com/docs/en/permission-modes#choose-the-classifier-model).
+
 ### Warp
 
 `byop --target warp` (or selecting **Warp** in the interactive checklist) installs Warp automatically if missing and configures a custom endpoint using **OpenAI Chat Completions**. Supply provider details in the wizard, or apply an existing profile with `byop apply --target warp` (add `--skip-install` to write settings without installing). Use `https://api.cosmaxis.com/v1` and model `pro` for the Cosmaxis setup verified on Warp `0.2026.10.21.08.25.02`.

@@ -41,8 +41,20 @@ class ClaudeTarget:
     name = "claude"
     display_name = "Claude Code"
 
-    def __init__(self, settings_path: Path = DEFAULT_SETTINGS_PATH) -> None:
+    def __init__(
+        self,
+        settings_path: Path = DEFAULT_SETTINGS_PATH,
+        *,
+        permission_mode: str | None = None,
+        auto_mode_model: str | None = None,
+    ) -> None:
+        if permission_mode not in (None, "manual", "auto"):
+            raise ValueError("Claude permission mode must be manual or auto.")
+        if auto_mode_model is not None and not auto_mode_model.strip():
+            raise ValueError("Claude classifier model must not be empty.")
         self.settings_path = settings_path
+        self.permission_mode = permission_mode
+        self.auto_mode_model = auto_mode_model.strip() if auto_mode_model is not None else None
 
     # ------------------------------------------------------------------
     # Install / detection
@@ -100,11 +112,21 @@ class ClaudeTarget:
         env: dict[str, str] = {
             "ANTHROPIC_BASE_URL": anthropic_base_url(provider.normalized_api_url()),
             "BYOP_PROVIDER": provider.provider_name,
+            "ANTHROPIC_CUSTOM_MODEL_OPTION": primary.name,
+            "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME": primary.display_name or primary.name,
+            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(primary.max_tokens),
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(primary.max_output_tokens),
         }
         fragment: dict = {
             "env": env,
             "model": primary.name,
         }
+        if self.permission_mode is not None:
+            fragment["permissions"] = {
+                "defaultMode": "default" if self.permission_mode == "manual" else "auto"
+            }
+        if self.auto_mode_model is not None:
+            env["CLAUDE_CODE_AUTO_MODE_MODEL"] = self.auto_mode_model
         helper = self._api_key_helper(provider, use_keychain=use_keychain)
         if helper is not None:
             fragment["apiKeyHelper"] = helper
@@ -174,26 +196,8 @@ class ClaudeTarget:
         target_base_url = anthropic_base_url(provider.normalized_api_url())
         if conflict_action == "skip":
             existing = self._load()
-            raw_env = existing.get("env")
-            existing_env = raw_env if isinstance(raw_env, dict) else {}
-            same = (
-                self._extract_provider_name(existing) == provider.provider_name
-                and existing_env.get("ANTHROPIC_BASE_URL") == target_base_url
-            )
-            if same:
-                if use_keychain or use_env:
-                    kc.ensure_key(
-                        server=provider.keychain_server(),
-                        api_key=provider.api_key,
-                        env_var=provider.env_var_name(),
-                        log=log,
-                        use_keychain=use_keychain,
-                        use_env=use_env,
-                    )
-                log(
-                    f"Skip: Claude Code already has {provider.provider_name} "
-                    f"with the same ANTHROPIC_BASE_URL."
-                )
+            if self._extract_provider_name(existing) == provider.provider_name:
+                log(f"Skip: Claude Code already has {provider.provider_name}; settings unchanged.")
                 return
 
         # Store key BEFORE build_fragment so Keychain detection sees fresh entries.
@@ -223,6 +227,11 @@ class ClaudeTarget:
         merged_env.update(fragment["env"])
         merged["env"] = merged_env
         merged["model"] = fragment["model"]
+        if "permissions" in fragment:
+            merged["permissions"] = {
+                **current.get("permissions", {}),
+                **fragment["permissions"],
+            }
 
         self._write(merged)
         log(f"Updated Claude Code settings at {self.settings_path}")
