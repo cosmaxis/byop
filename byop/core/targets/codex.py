@@ -169,7 +169,7 @@ class CodexTarget:
             "model_provider": provider.provider_name,
             "model_providers": {provider.provider_name: block},
         }
-        if primary.reasoning_effort not in (None, "none"):
+        if primary.reasoning_effort is not None:
             fragment["model_reasoning_effort"] = primary.reasoning_effort
         if has_reasoning or len(provider.models) > 1:
             fragment["model_catalog_json"] = str(

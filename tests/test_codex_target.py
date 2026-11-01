@@ -155,12 +155,14 @@ def test_codex_build_fragment_includes_reasoning_and_catalog(tmp_path):
     assert "model_providers" in frag
 
 
-def test_codex_build_fragment_omits_catalog_when_no_reasoning(tmp_path):
-    prov = _provider(models=[ModelConfig(name="plain", reasoning_effort="none")])
-    target = CodexTarget(tmp_path / "config.toml", catalog_dir=tmp_path / "catalogs")
-    frag = target.build_fragment(prov, use_keychain=False, use_env=True)
-    assert "model_catalog_json" not in frag
-    assert "model_supports_reasoning_summaries" not in frag
+@pytest.mark.parametrize(("effort", "expected"), [(None, None), ("none", "none")])
+def test_codex_single_model_preserves_explicit_reasoning_off(tmp_path, effort, expected):
+    path = tmp_path / "config.toml"
+    path.write_text('model_reasoning_effort = "high"\n')
+    provider = _provider(models=[ModelConfig(name="plain", reasoning_effort=effort)])
+    with mock.patch("byop.core.targets.codex.kc.ensure_key"):
+        CodexTarget(path).configure(provider, use_keychain=False, use_env=True, log=lambda _: None)
+    assert tomllib.loads(path.read_text()).get("model_reasoning_effort") == expected
 
 
 def test_codex_build_catalog_has_all_models(tmp_path):

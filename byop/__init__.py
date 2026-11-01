@@ -15,4 +15,4 @@ try:  # pragma: no cover - resolved at install time
 
     __version__ = _pkg_version("byop")
 except Exception:  # pragma: no cover
-    __version__ = "2.1.7"  # keep in sync with pyproject.toml
+    __version__ = "2.1.8"  # keep in sync with pyproject.toml

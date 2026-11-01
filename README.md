@@ -339,10 +339,13 @@ The command-backed keychain lookup uses macOS's `security` command at request
 time. Review the generated fragment with `--dry-run` before applying it, and
 ensure the keychain entry is available to the Codex process.
 
-For multiple models or configured reasoning effort, byop builds the Codex model
+For multiple models or enabled reasoning effort, byop builds the Codex model
 picker catalog from the installed CLI's bundled metadata. Install or update
 the Codex CLI first; the selected gateway must support the Responses API and
 the requested reasoning levels. The catalog does not discover gateway capabilities.
+
+For Codex, `--model MODEL:reasoning_effort=none` explicitly requests no
+reasoning; omitting `reasoning_effort` leaves the choice to Codex.
 
 ## Security
 
