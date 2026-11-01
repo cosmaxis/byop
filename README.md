@@ -326,7 +326,8 @@ warning).
 
 
 Codex custom providers must use the OpenAI Responses API (`wire_api =
-"responses"`). With the default keychain mode, byop stores the secret in the
+"responses"`). The base URL cannot contain credentials, a query string, or a
+fragment; supply credentials in the API key field. With the default keychain mode, byop stores the secret in the
 macOS keychain and configures Codex's command-backed `auth` lookup, so the
 secret is not written to `config.toml`. With `--no-keychain`, Codex references
 the generated environment variable name instead; byop does not write the secret

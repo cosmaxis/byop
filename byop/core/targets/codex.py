@@ -42,6 +42,28 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess:  # pragma: no cover
     return subprocess.run(cmd, capture_output=True, text=True, check=False)
 
 
+
+def _codex_cli() -> str | None:
+    executable = shutil.which("codex")
+    if executable:
+        return executable
+    for root in (Path.home() / "Applications", Path("/Applications")):
+        for app in ("Codex.app", "ChatGPT.app"):
+            resources = root / app / "Contents" / "Resources"
+            for relative in ("codex-cli/bin/codex", "codex-cli/CodexCLI.app/Contents/MacOS/codex", "codex"):
+                candidate = resources / relative
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    return str(candidate)
+    return None
+
+
+def _active_provider(data: dict) -> str | None:
+    name = data.get("model_provider")
+    if isinstance(name, str) and name:
+        return name
+    model = data.get("model")
+    return "openai" if isinstance(model, str) and model else None
+
 def _catalog_path_for(provider_name: str, catalog_dir: Path = DEFAULT_CATALOG_DIR) -> Path:
     # Percent encoding is reversible, unlike replacing spaces and dots with underscores.
     return catalog_dir / f"{quote(provider_name, safe='-_.')}.json"
@@ -84,10 +106,9 @@ class CodexTarget:
     # ------------------------------------------------------------------
     def is_installed(self) -> bool:
         return (
-            shutil.which("codex") is not None
+            _codex_cli() is not None
             or Path("/Applications/Codex.app").exists()
             or (Path.home() / "Applications" / "Codex.app").exists()
-            or Path("/Applications/ChatGPT.app/Contents/Resources/codex").exists()
         )
 
     def install(self, log: Callable[[str], None] = print) -> None:  # pragma: no cover
@@ -114,6 +135,9 @@ class CodexTarget:
         """Return the Codex TOML fragment without exposing the API key."""
         if provider.provider_name.lower() in {"openai", "ollama", "lmstudio"}:
             raise ValueError("Codex reserves the provider IDs openai, ollama, and lmstudio.")
+        parsed = urlsplit(provider.api_url)
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("Codex API URL must not contain credentials, a query, or a fragment.")
         primary = provider.models[0]
         block: dict = {
             "name": provider.provider_name,
@@ -156,10 +180,7 @@ class CodexTarget:
 
     def build_catalog(self, provider: ProviderConfig) -> dict:
         """Derive catalog entries from the installed client's own bundled metadata."""
-        executable = shutil.which("codex")
-        if executable is None:
-            candidate = Path("/Applications/ChatGPT.app/Contents/Resources/codex")
-            executable = str(candidate) if candidate.is_file() else None
+        executable = _codex_cli()
         if executable is None:
             raise RuntimeError("Codex CLI is required to build its model catalog; install Codex first.")
         try:
@@ -220,7 +241,7 @@ class CodexTarget:
 
         original = self.config_path.read_bytes() if self.config_path.exists() else None
         current = self._load()
-        existing_provider = current.get("model_provider")
+        existing_provider = _active_provider(current)
         if conflict_action == "skip" and existing_provider:
             log(f"Skip: Codex already uses {existing_provider}.")
             return
@@ -274,9 +295,8 @@ class CodexTarget:
         log(f"Updated Codex config at {self.config_path}")
 
     def current_provider_names(self) -> list[str]:
-        data = self._load()
-        name = data.get("model_provider")
-        return [name] if isinstance(name, str) and name else []
+        name = _active_provider(self._load())
+        return [name] if name else []
 
     def export_config(self) -> dict:
         data = self._load()

@@ -42,9 +42,21 @@ def test_codex_default_path():
 
 
 def test_codex_settings_directory_alone_does_not_imply_installation(tmp_path, monkeypatch):
-    monkeypatch.setattr("byop.core.targets.codex.shutil.which", lambda _: None)
+    monkeypatch.setattr("byop.core.targets.codex._codex_cli", lambda: None)
     with mock.patch.object(Path, "exists", return_value=False):
         assert CodexTarget(tmp_path / "config.toml").is_installed() is False
+
+
+def test_codex_uses_desktop_bundled_cli_when_not_on_path(tmp_path, monkeypatch):
+    binary = tmp_path / "Applications" / "Codex.app" / "Contents" / "Resources" / "codex-cli" / "bin" / "codex"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    monkeypatch.setattr("byop.core.targets.codex.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("byop.core.targets.codex.shutil.which", lambda _: None)
+    target = CodexTarget(tmp_path / "config.toml")
+    assert target.is_installed()
+    assert target.build_catalog(_provider())["models"][0]["slug"] == "hy3"
 
 
 def test_codex_build_fragment_uses_responses_and_env_key():
@@ -69,6 +81,20 @@ def test_codex_build_fragment_uses_command_auth_without_secret():
 def test_codex_build_fragment_rejects_missing_credentials():
     with pytest.raises(ValueError, match="either keychain storage"):
         CodexTarget().build_fragment(_provider(), use_keychain=False, use_env=False)
+
+
+@pytest.mark.parametrize("url", [
+    "https://user:password@example.com/v1",
+    "https://example.com/v1?api_key=secret-query",
+    "https://example.com/v1#secret",
+])
+def test_codex_rejects_credential_bearing_urls_without_writes(tmp_path, url):
+    cfg = tmp_path / "config.toml"
+    with mock.patch("byop.core.targets.codex.kc.ensure_key") as ensure_key, \
+         pytest.raises(ValueError, match="Codex API URL"):
+        CodexTarget(cfg).configure(_provider(api_url=url), log=lambda _: None)
+    assert not cfg.exists()
+    ensure_key.assert_not_called()
 
 
 def test_codex_configure_merges_and_preserves_other_values(tmp_path):
@@ -105,6 +131,18 @@ def test_codex_current_provider_names(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('model_provider = "HyberOrbit"\n', encoding="utf-8")
     assert CodexTarget(path).current_provider_names() == ["HyberOrbit"]
+
+
+def test_codex_implicit_openai_model_is_an_active_provider(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('model = "gpt-5"\n')
+    target = CodexTarget(path)
+    original = path.read_bytes()
+    assert target.current_provider_names() == ["openai"]
+    with mock.patch("byop.core.targets.codex.kc.ensure_key") as ensure_key:
+        target.configure(_provider(), conflict_action="skip", log=lambda _: None)
+    assert path.read_bytes() == original
+    ensure_key.assert_not_called()
 
 
 def test_codex_build_fragment_includes_reasoning_and_catalog(tmp_path):
