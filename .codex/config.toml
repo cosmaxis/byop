@@ -1,30 +1,33 @@
 #:schema https://developers.openai.com/codex/config-schema.json
 
-# ECC Tools generated Codex baseline
-approval_policy = "on-request"
-sandbox_mode = "workspace-write"
-web_search = "live"
-
-[mcp_servers.github]
+# ECC roles are project-specific; approval and sandbox settings remain user-controlled.
+# Servers are opt-in: inspect their packages and configure credentials before enabling.
+[mcp_servers.ecc_github]
+enabled = false
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
 
-[mcp_servers.context7]
+[mcp_servers.ecc_context7]
+enabled = false
 command = "npx"
 args = ["-y", "@upstash/context7-mcp@latest"]
 
-[mcp_servers.exa]
+[mcp_servers.ecc_exa]
+enabled = false
 url = "https://mcp.exa.ai/mcp"
 
-[mcp_servers.memory]
+[mcp_servers.ecc_memory]
+enabled = false
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-memory"]
 
-[mcp_servers.playwright]
+[mcp_servers.ecc_playwright]
+enabled = false
 command = "npx"
 args = ["-y", "@playwright/mcp@latest", "--extension"]
 
-[mcp_servers.sequential-thinking]
+[mcp_servers.ecc_sequential-thinking]
+enabled = false
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-sequential-thinking"]
 

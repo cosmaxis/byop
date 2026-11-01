@@ -1,127 +1,37 @@
-# Instincts generated from https://github.com/thinhngotony/byop
-# Generated: 2026-08-24T08:14:17.427Z
-# Version: 2.0
-# NOTE: This file supplements (does not replace) any existing curated instincts.
-# High-confidence manually curated instincts should be preserved alongside these.
-
----
-id: byop-commit-conventional
-trigger: "when writing a commit message"
-confidence: 0.85
-domain: git
-source: repo-analysis
-source_repo: https://github.com/thinhngotony/byop
----
-
-# Byop Commit Conventional
-
-## Action
-
-Use conventional commit format with prefixes: feat
-
-## Evidence
-
-- 1 commits analyzed
-- Detected conventional commit pattern
-- Examples: feat: add Codex custom provider target
-
----
-id: byop-commit-length
-trigger: "when writing a commit message"
-confidence: 0.6
-domain: git
-source: repo-analysis
-source_repo: https://github.com/thinhngotony/byop
----
-
-# Byop Commit Length
-
-## Action
-
-Keep commit messages concise (~38 characters)
-
-## Evidence
-
-- Average commit message length: 38 chars
-- Based on 1 commits
+# Repository-specific instincts; import only when using continuous-learning-v2.
 
 ---
 id: byop-naming-files
-trigger: "when creating a new file"
+trigger: "when creating Python files or functions in byop"
 confidence: 0.8
 domain: code-style
 source: repo-analysis
-source_repo: https://github.com/thinhngotony/byop
 ---
 
-# Byop Naming Files
+# Python naming
 
-## Action
-
-Use camelCase naming convention
-
-## Evidence
-
-- Analyzed file naming patterns in repository
-- Dominant pattern: camelCase
+Use `snake_case` for Python files and functions, consistent with the repository.
 
 ---
-id: byop-import-relative
-trigger: "when importing modules"
-confidence: 0.75
-domain: code-style
+id: byop-target-config
+trigger: "when configuring a coding-tool target"
+confidence: 0.8
+domain: architecture
 source: repo-analysis
-source_repo: https://github.com/thinhngotony/byop
 ---
 
-# Byop Import Relative
+# Target configuration
 
-## Action
-
-Use relative imports for project files
-
-## Evidence
-
-- Import analysis shows relative import pattern
-- Example: import { x } from '../lib/x'
+Implement target-specific behavior in `byop/core/targets/` and preserve unrelated user settings.
 
 ---
-id: byop-export-style
-trigger: "when exporting from a module"
-confidence: 0.7
-domain: code-style
-source: repo-analysis
-source_repo: https://github.com/thinhngotony/byop
----
-
-# Byop Export Style
-
-## Action
-
-Prefer named exports
-
-## Evidence
-
-- Export pattern analysis
-- Dominant style: named
-
----
-id: byop-test-separate
-trigger: "when writing tests"
+id: byop-test-isolation
+trigger: "when testing target configuration or credentials"
 confidence: 0.8
 domain: testing
 source: repo-analysis
-source_repo: https://github.com/thinhngotony/byop
 ---
 
-# Byop Test Separate
+# Isolated tests
 
-## Action
-
-Place tests in the tests/ or __tests__/ directory, mirroring src structure
-
-## Evidence
-
-- Separate test directory pattern detected
-- Tests live in dedicated test folders
-
+Use temporary paths and mock system services; do not write real settings or keychains.
