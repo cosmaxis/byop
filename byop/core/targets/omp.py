@@ -339,7 +339,7 @@ def _emit_models_yaml(data: dict) -> str:
 
 class OmpTarget(PyTarget):
     name = "omp"
-    display_name = "Oh My Pi (omp)"
+    display_name = "Oh My Pi"
 
     def __init__(
         self,

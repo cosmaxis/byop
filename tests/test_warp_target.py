@@ -266,3 +266,81 @@ def test_schema_guard_rejects_incompatible_structure(tmp_path, monkeypatch, muta
 def test_endpoint_must_be_public_https(url):
     with pytest.raises(ValueError):
         validate_warp_endpoint(url)
+
+
+def test_install_uses_homebrew_cask_when_available(tmp_path, monkeypatch):
+    from subprocess import CompletedProcess
+
+    monkeypatch.setattr("byop.core.targets.warp.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("byop.core.targets.warp.WARP_APP", tmp_path / "Warp.app")
+    monkeypatch.setattr("byop.core.targets.warp.shutil.which", lambda cmd: "/opt/homebrew/bin/brew" if cmd == "brew" else None)
+    commands = []
+
+    def fake_run(cmd):
+        commands.append(cmd)
+        (tmp_path / "Warp.app").mkdir()
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("byop.core.targets.warp._run", fake_run)
+    target = WarpTarget(tmp_path / "settings.toml")
+    assert target.is_installed() is False
+    target.install(log=lambda _: None)
+    assert commands == [["brew", "install", "--cask", "warp"]]
+    assert target.is_installed() is True
+
+
+def test_install_falls_back_to_dmg_download_and_copies_app(tmp_path, monkeypatch):
+    import plistlib
+    from subprocess import CompletedProcess
+
+    monkeypatch.setattr("byop.core.targets.warp.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("byop.core.targets.warp.WARP_APP", tmp_path / "Applications" / "Warp.app")
+    monkeypatch.setattr("byop.core.targets.warp.shutil.which", lambda _: None)
+
+    mount_dir = tmp_path / "mnt"
+    (mount_dir / "Warp.app").mkdir(parents=True)
+    plist_out = plistlib.dumps({"system-entities": [{"mount-point": str(mount_dir)}]}).decode("utf-8")
+    commands = []
+
+    def fake_retrieve(url, dest):
+        dest.write_bytes(b"dmg")
+
+    def fake_run(cmd):
+        commands.append(cmd)
+        if cmd[:2] == ["hdiutil", "attach"]:
+            return CompletedProcess(cmd, 0, plist_out, "")
+        if cmd[0] == "ditto":
+            (tmp_path / "Applications" / "Warp.app").mkdir(parents=True, exist_ok=True)
+            return CompletedProcess(cmd, 0, "", "")
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("byop.core.targets.warp.urllib.request.urlretrieve", fake_retrieve)
+    monkeypatch.setattr("byop.core.targets.warp._run", fake_run)
+
+    target = WarpTarget(tmp_path / "settings.toml")
+    target.install(log=lambda _: None)
+    assert any(cmd[0] == "ditto" for cmd in commands)
+    assert any(cmd[:2] == ["hdiutil", "detach"] for cmd in commands)
+    assert target.is_installed() is True
+
+
+def test_schema_guard_checks_user_applications_fallback(tmp_path, monkeypatch):
+    from byop.core.targets import warp
+
+    schema = {"$defs": {
+        "CustomEndpointDefinition": {"type": "object", "required": ["name", "base_url", "models"], "properties": {
+            "name": {"type": "string"}, "base_url": {"type": "string"},
+            "schema": {"$ref": "#/$defs/CustomEndpointSchema"},
+            "models": {"type": "array", "items": {"$ref": "#/$defs/CustomEndpointModel"}},
+        }},
+        "CustomEndpointModel": {"type": "object", "properties": {
+            "name": {"type": "string"}, "alias": {"type": ["string", "null"]}, "config_key": {"type": "string"},
+        }},
+        "CustomEndpointSchema": {"oneOf": [{"const": "openai_chat_completions", "type": "string"}]},
+    }}
+    user_resources = tmp_path / "Applications" / "Warp.app" / "Contents" / "Resources"
+    user_resources.mkdir(parents=True)
+    (user_resources / "settings_schema.json").write_text(json.dumps(schema))
+    monkeypatch.setattr(warp, "WARP_APP", tmp_path / "MissingWarp.app")
+    monkeypatch.setattr(warp.Path, "home", lambda: tmp_path)
+    assert endpoint_schema_supported() is True

@@ -37,7 +37,7 @@ class PyTarget:
     """
 
     name = "py"
-    display_name = "py.dev (Pi)"
+    display_name = "py.dev"
 
     def __init__(self, models_path: Path = MODELS_PATH) -> None:
         self.models_path = models_path
