@@ -471,12 +471,14 @@ def test_first_run_leaves_unselected_missing_app_untouched(monkeypatch, tmp_path
     monkeypatch.setattr(cli.prompt, "choose", lambda *args, **kwargs: next(actions))
 
     choices = []
+    hints_seen = []
     monkeypatch.setattr(
         cli.prompt, "select_many",
-        lambda question, options: choices.extend(options) or [],
+        lambda question, options, **kw: (choices.extend(options), hints_seen.extend(kw.get("hints", ()))) and [],
     )
     assert cli.main([]) == 0
-    assert choices == ["Zed (not installed)"]
+    assert choices == ["Zed"]
+    assert hints_seen == ["not installed"]
     assert calls == []
     assert prof.get_active_profile_name() == "Demo"
     assert prof.list_profiles() == ["Demo"]
@@ -517,14 +519,15 @@ def test_skip_install_allows_selecting_missing_app(monkeypatch):
 
     monkeypatch.setattr(tmod, "available_targets", lambda **kwargs: [MissingTarget()])
     choices = []
+    hints_seen = []
     monkeypatch.setattr(
         cli.prompt, "select_many",
-        lambda question, options: choices.extend(options) or [0],
+        lambda question, options, **kw: (choices.extend(options), hints_seen.extend(kw.get("hints", ()))) and [0],
     )
     args = cli.build_parser().parse_args(["apply", "--skip-install"])
     assert [target.name for target in cli._select_targets(args, interactive=True)] == ["zed"]
-    assert choices == ["Zed (not installed)"]
-
+    assert choices == ["Zed"]
+    assert hints_seen == ["not installed"]
 
 def test_interactive_menu_adds_and_switches_provider(monkeypatch, tmp_path):
     from byop.core.config import ModelConfig, ProviderConfig
@@ -695,7 +698,6 @@ def test_zed_questions_only_appear_during_zed_setup(monkeypatch, tmp_path):
     monkeypatch.setattr(kc, "keychain_get", lambda *_: "secret-123")
     monkeypatch.setattr(kc, "keychain_set", lambda *args: None)
     configured = {}
-    questions = []
 
     class Target:
         def __init__(self, name):
@@ -712,23 +714,24 @@ def test_zed_questions_only_appear_during_zed_setup(monkeypatch, tmp_path):
             configured[self.name] = provider
 
     monkeypatch.setattr(tmod, "available_targets", lambda **kwargs: [Target("zed"), Target("py")])
-    def confirm(question, default=False):
-        questions.append(question)
-        if question.startswith("Configure"):
-            return True
-        return question.startswith("Use for Git")
+    select_calls = []
 
-    monkeypatch.setattr(cli.prompt, "confirm", confirm)
-    monkeypatch.setattr(cli.prompt, "select_many", lambda *args, **kwargs: [0, 1])
+    def select_many(title, options, **kw):
+        select_calls.append(title)
+        if title == "Tools":
+            return [0, 1]
+        # Zed roles checklist: pick only "Git commit messages" (index 2).
+        return [2]
+
+    monkeypatch.setattr(cli.prompt, "select_many", select_many)
     args = cli._make_args_for_apply(prof.load_profile("Demo"), "secret-123", {"use_keychain": True})
     args.skip_install = True
     assert cli._run_apply(args, interactive_session=True) == 0
-    assert any("default Agent model" in question for question in questions)
+    assert select_calls == ["Tools", "Zed roles"]
     assert configured["zed"].set_default_agent is False
     assert configured["zed"].set_commit_message is True
     assert configured["py"].set_default_agent is True
     assert prof.load_profile("Demo").set_commit_message is True
-
 
 def test_edit_provider_renames_profile_without_overwriting_another(monkeypatch, tmp_path):
     from byop.core.config import ModelConfig, ProviderConfig
@@ -830,15 +833,58 @@ def test_checklist_applies_only_selected_tools_and_installs_only_missing(monkeyp
     targets = [Target("py", True), Target("omp", False), Target("opencode", True)]
     monkeypatch.setattr(tmod, "available_targets", lambda **kwargs: targets)
     choices = []
+    hints_seen = []
+    confirm_questions = []
     monkeypatch.setattr(
         cli.prompt, "select_many",
-        lambda title, options: choices.extend(options) or [0, 1],
+        lambda title, options, **kw: (choices.extend(options), hints_seen.extend(kw.get("hints", ()))) and [0, 1],
+    )
+    monkeypatch.setattr(
+        cli.prompt, "confirm",
+        lambda question, default=False: confirm_questions.append((question, default)) or True,
     )
     args = cli._make_args_for_apply(prof.load_profile("Demo"), "secret-123", {"use_keychain": True})
     assert cli._run_apply(args, interactive_session=True) == 0
-    assert choices == ["py (installed)", "omp (not installed)", "opencode (installed)"]
+    assert choices == ["py", "omp", "opencode"]
+    assert hints_seen == ["installed", "not installed", "installed"]
+    assert confirm_questions == [("Install omp automatically?", True)]
     assert events == [("configure", "py"), ("install", "omp"), ("configure", "omp")]
 
+
+def test_declining_auto_install_skips_missing_tool_and_configures_installed(monkeypatch, tmp_path):
+    import byop.core.targets as tmod
+    from byop.core.config import ModelConfig, ProviderConfig
+
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path))
+    provider = ProviderConfig("Demo", "https://example.com/v1", "secret-123", [ModelConfig("m")])
+    prof.save_profile(prof.profile_from_provider(provider, name="Demo"))
+    prof.set_active_profile_name("Demo")
+    monkeypatch.setattr(kc, "keychain_set", lambda *args: None)
+    events = []
+
+    class Target:
+        def __init__(self, name, installed):
+            self.name = self.display_name = name
+            self.installed = installed
+
+        def is_installed(self):
+            return self.installed
+
+        def current_provider_names(self):
+            return []
+
+        def install(self, log=print):
+            events.append(("install", self.name))
+
+        def configure(self, provider, **kwargs):
+            events.append(("configure", self.name))
+
+    monkeypatch.setattr(tmod, "available_targets", lambda **kwargs: [Target("claude", True), Target("Warp", False)])
+    monkeypatch.setattr(cli.prompt, "select_many", lambda *args, **kwargs: [0, 1])
+    monkeypatch.setattr(cli.prompt, "confirm", lambda question, default=False: False)
+    args = cli._make_args_for_apply(prof.load_profile("Demo"), "secret-123", {"use_keychain": True})
+    assert cli._run_apply(args, interactive_session=True) == 0
+    assert events == [("configure", "claude")]
 
 def test_cancelled_checklist_does_not_change_credentials_or_profile(monkeypatch, tmp_path, capsys):
     import byop.core.targets as tmod

@@ -45,7 +45,7 @@ writes your secret to disk in plaintext.
 | `omp` (oh-my-pi / Oh My Pi) | `~/.omp/agent/models.yml` | `brew install can1357/tap/omp` / `curl -fsSL https://omp.sh/install | sh` |
 | `claude` (Claude Code) | `~/.claude/settings.json` | `brew install --cask claude-code` / `npm i -g @anthropic-ai/claude-code` / `curl -fsSL https://claude.ai/install.sh | sh` |
 | `opencode` (OpenCode) | `~/.config/opencode/opencode.json` | `brew install --cask opencode` / `curl -fsSL https://opencode.ai/install | sh` |
-| `warp` (Warp) | `~/.warp/settings.toml` + macOS Keychain | Homebrew cask / https://www.warp.dev/download |
+| `warp` (Warp) | `~/.warp/settings.toml` + macOS Keychain | Homebrew cask / official DMG download |
 
 ### Claude Code & OpenCode
 
@@ -54,7 +54,7 @@ writes your secret to disk in plaintext.
 
 ### Warp
 
-`byop --target warp --skip-install` configures a custom endpoint using **OpenAI Chat Completions**. Supply provider details in the wizard, or apply an existing profile with `byop apply --target warp --skip-install`. Use `https://api.cosmaxis.com/v1` and model `pro` for the Cosmaxis setup verified on Warp `0.2026.10.21.08.25.02`.
+`byop --target warp` (or selecting **Warp** in the interactive checklist) installs Warp automatically if missing and configures a custom endpoint using **OpenAI Chat Completions**. Supply provider details in the wizard, or apply an existing profile with `byop apply --target warp` (add `--skip-install` to write settings without installing). Use `https://api.cosmaxis.com/v1` and model `pro` for the Cosmaxis setup verified on Warp `0.2026.10.21.08.25.02`.
 
 - The installed app's `Contents/Resources/settings_schema.json` must describe the supported endpoint/model format. Older or incompatible versions fall back to redacted manual instructions. `--no-keychain` also requires manual setup; Warp does not use a shell environment-variable reference for this credential.
 - Non-secret endpoints live in `agents.custom_endpoints`. Model UUIDs remain stable on reapply. The first model becomes the default agent model when default-agent selection is enabled. Other endpoints, permissions, settings, and comments are preserved; the first original file is backed up to `settings.toml.bak` with owner-only permissions.
@@ -111,10 +111,7 @@ pipx install "git+https://github.com/Cosmaxis/byop.git"
 byop
 ```
 
-Use ↑/↓ and Enter to navigate the menu. To set up tools, move with ↑/↓,
-toggle each checkbox with Space, then press Enter. No tools are selected by
-default; selecting a missing tool attempts installation when supported.
-Escape or Ctrl-C cancels.
+Use ↑/↓ and Enter to navigate menus; completed steps collapse into a single summary line. When choosing tools, move with ↑/↓, toggle with Space (or press `a` to toggle all), and confirm with Enter. Selecting an uninstalled tool prompts once to install and configure it automatically. Escape or Ctrl-C cancels.
 
 Set `BYOP_PLAIN=1` for line-based numbered menus, including in a terminal.
 Piped input and terminals too small for the checklist use this fallback

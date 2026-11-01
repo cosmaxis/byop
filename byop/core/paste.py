@@ -76,22 +76,15 @@ def _safe_loads(text: str) -> Any:
 
 
 def looks_like_provider_paste(text: str) -> bool:
-    """True if ``text`` looks like the user's provider JSON rather than a one-field answer.
-
-    Accepts strict JSON and JSONC (with comments); both are sanitized before
-    the actual parse in :func:`parse_provider_paste`.
-    """
+    """True if ``text`` looks like a JSON/JSONC provider object rather than a plain field."""
     stripped = text.strip()
-    if "\n" not in stripped:
-        return False
-    if not _PASTE_HINT.search(stripped):
+    if not (stripped.startswith("{") and stripped.endswith("}")):
         return False
     try:
-        _safe_loads(stripped)
+        parsed = _safe_loads(stripped)
     except (json.JSONDecodeError, ValueError):
         return False
-    return True
-
+    return isinstance(parsed, dict)
 
 def _coerce_model(raw: dict[str, Any]) -> ModelConfig:
     """Normalize a per-model dict into a ModelConfig.

@@ -4,9 +4,12 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import plistlib
 import shutil
 import socket
+import subprocess
 import tempfile
+import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
@@ -19,11 +22,22 @@ from ..warp_keychain import delete_endpoint_keys, get_endpoint_keys, set_endpoin
 
 DEFAULT_SETTINGS_PATH = Path.home() / ".warp" / "settings.toml"
 WARP_APP = Path("/Applications/Warp.app")
+WARP_DMG_URL = "https://app.warp.dev/download?package=dmg"
 RESTART_NOTICE = (
     "Warp: save active work, fully quit Warp (Cmd-Q), then reopen it. "
     "Opening a new tab does not reload cached API keys. Select your custom model, not Auto."
 )
 
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+
+def _warp_app_path() -> Path:
+    if WARP_APP.exists():
+        return WARP_APP
+    user_app = Path.home() / "Applications" / "Warp.app"
+    return user_app if user_app.exists() else WARP_APP
 
 def validate_warp_endpoint(url: str) -> None:
     parsed = urlparse(url)
@@ -49,7 +63,7 @@ def validate_warp_endpoint(url: str) -> None:
 def endpoint_schema_supported() -> bool:
     """Fail closed when the installed app does not describe the expected file format."""
     try:
-        schema = json.loads((WARP_APP / "Contents/Resources/settings_schema.json").read_text())
+        schema = json.loads((_warp_app_path() / "Contents/Resources/settings_schema.json").read_text())
         definitions = schema["$defs"]
         endpoint = definitions["CustomEndpointDefinition"]["properties"]
         model = definitions["CustomEndpointModel"]["properties"]
@@ -89,6 +103,49 @@ def atomic_write(path: Path, content: bytes, mode: int = 0o600) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def _install_via_download(log: Callable[[str], None] = print) -> None:
+    """Download the official Warp DMG, mount it read-only, and copy Warp.app."""
+    log("Downloading Warp installer...")
+    with tempfile.TemporaryDirectory() as tmp:
+        dmg = Path(tmp) / "Warp.dmg"
+        try:
+            urllib.request.urlretrieve(WARP_DMG_URL, dmg)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Warp download failed ({exc}). Install manually from https://www.warp.dev/download"
+            ) from exc
+        attach = _run(["hdiutil", "attach", "-nobrowse", "-readonly", "-plist", str(dmg)])
+        if attach.returncode != 0:
+            raise RuntimeError(
+                "Failed to mount Warp.dmg:\n" + (attach.stderr or attach.stdout).strip()
+            )
+        mount_point: str | None = None
+        try:
+            info = plistlib.loads(attach.stdout.encode("utf-8"))
+            for entity in info.get("system-entities", []):
+                mp = entity.get("mount-point")
+                if isinstance(mp, str) and (Path(mp) / "Warp.app").exists():
+                    mount_point = mp
+                    break
+            if not mount_point:
+                raise RuntimeError("Warp.app not found inside downloaded Warp.dmg.")
+            dest = (
+                WARP_APP
+                if os.access(WARP_APP.parent, os.W_OK)
+                else Path.home() / "Applications" / "Warp.app"
+            )
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            copy_res = _run(["ditto", str(Path(mount_point) / "Warp.app"), str(dest)])
+            if copy_res.returncode != 0:
+                raise RuntimeError(
+                    "Failed to copy Warp.app:\n" + (copy_res.stderr or copy_res.stdout).strip()
+                )
+        finally:
+            if mount_point:
+                _run(["hdiutil", "detach", mount_point, "-quiet"])
+    log("Warp installed via direct download.")
+
+
 class WarpTarget:
     name = "warp"
     display_name = "Warp"
@@ -97,14 +154,24 @@ class WarpTarget:
         self.settings_path = Path(settings_path)
 
     def is_installed(self) -> bool:
-        return WARP_APP.exists() or (Path.home() / "Applications" / "Warp.app").exists() or shutil.which("warp") is not None
+        return (
+            WARP_APP.exists()
+            or (Path.home() / "Applications" / "Warp.app").exists()
+            or shutil.which("warp") is not None
+        )
 
     def install(self, log: Callable[[str], None] = print) -> None:
-        if shutil.which("brew"):
-            log("Warp is not installed. Install it with: brew install --cask warp")
-        else:
-            log("Install Warp from https://www.warp.dev/download, then re-run byop.")
-
+        if self.is_installed():
+            return
+        if shutil.which("brew") is not None:
+            log("Installing Warp via Homebrew...")
+            res = _run(["brew", "install", "--cask", "warp"])
+            if res.returncode == 0:
+                log("Warp installed via Homebrew.")
+                return
+            detail = (res.stderr or res.stdout).strip()
+            log(f"Homebrew install failed ({detail}); trying direct download.")
+        _install_via_download(log=log)
     @staticmethod
     def _read(path: Path) -> dict:
         if not path.exists():
