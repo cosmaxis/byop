@@ -9,6 +9,7 @@ from .registry import ALL_TARGETS, available_targets
 
 if TYPE_CHECKING:
     from .claude import ClaudeTarget
+    from .codex import CodexTarget
     from .omp import OmpTarget
     from .py import PyTarget
     from .warp import WarpTarget
@@ -23,6 +24,7 @@ __all__ = [
     "PyTarget",
     "OmpTarget",
     "ClaudeTarget",
+    "CodexTarget",
     "WarpTarget",
     "ZedTarget",
     "ALL_TARGETS",
@@ -40,6 +42,9 @@ def __getattr__(name: str) -> object:
     if name == "ClaudeTarget":
         from .claude import ClaudeTarget
         return ClaudeTarget
+    if name == "CodexTarget":
+        from .codex import CodexTarget
+        return CodexTarget
     if name == "ZedTarget":
         from .zed import ZedTarget
         return ZedTarget

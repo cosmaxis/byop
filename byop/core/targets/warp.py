@@ -18,6 +18,7 @@ from uuid import uuid4
 import tomlkit
 
 from ..config import ProviderConfig
+from ..settings import atomic_write
 from ..warp_keychain import delete_endpoint_keys, get_endpoint_keys, set_endpoint_keys
 
 DEFAULT_SETTINGS_PATH = Path.home() / ".warp" / "settings.toml"
@@ -89,18 +90,6 @@ def endpoint_schema_supported() -> bool:
         return False
 
 
-def atomic_write(path: Path, content: bytes, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            os.fchmod(handle.fileno(), mode)
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
 
 
 def _install_via_download(log: Callable[[str], None] = print) -> None:

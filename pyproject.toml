@@ -31,7 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7.0", "pytest-cov"]
-dev = ["pytest>=7.0", "pytest-cov", "ruff", "mypy"]
+dev = ["pytest>=7.0", "pytest-cov", "ruff", "mypy", "build"]
 
 [project.scripts]
 byop = "byop.cli:main"

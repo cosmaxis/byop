@@ -18,12 +18,12 @@ class ConflictAction(str, Enum):  # noqa: UP042
 def default_conflict_action(target_name: str, *, interactive: bool) -> str | None:
     """Return the non-interactive default for a given target, or None for interactive.
 
-    Rule: zed/claude REPLACE the active default; py/omp/opencode APPEND a new entry.
+    Rule: zed/claude/codex/warp REPLACE; py/omp/opencode APPEND a new entry.
     Interactive runs always return None to signal "ask the user".
     """
     if interactive:
         return None
-    return "replace" if target_name in {"zed", "claude", "warp"} else "append"
+    return "replace" if target_name in {"zed", "claude", "codex", "warp"} else "append"
 
 
 # Names of the targets that allow multiple concurrent provider entries.

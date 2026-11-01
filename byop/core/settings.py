@@ -8,12 +8,29 @@ same style so we never destroy a user's hand-written comments or formatting.
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
 _COMMENT_RE = re.compile(r'(?://[^\n\r]*|/\*.*?\*/)', re.DOTALL)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+
+
+def atomic_write(path: Path, content: bytes, mode: int = 0o600) -> None:
+    """Atomically replace a file with the requested permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            os.fchmod(handle.fileno(), mode)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _strip_comments(text: str) -> str:

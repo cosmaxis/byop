@@ -152,8 +152,8 @@ def _add_apply_args(p: argparse.ArgumentParser) -> None:
         "--target",
         action="append",
         default=[],
-        choices=["zed", "py", "omp", "claude", "opencode", "warp"],
-        help="Restrict to specific target(s): zed, py, omp, claude, opencode, warp (repeatable). Defaults to all detected/installed apps.",
+        choices=["zed", "py", "omp", "claude", "codex", "opencode", "warp"],
+        help="Restrict to specific target(s): zed, py, omp, claude, codex, opencode, warp (repeatable). Defaults to all detected/installed apps.",
     )
     p.add_argument(
         "--profile",
@@ -667,23 +667,9 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
             "Pass --conflict replace|skip|append for non-interactive runs."
         )
         return 2
-    if not args.dry_run:
-        profile = prof.profile_from_provider(
-            provider, name=profile_name,
-            api_key_ref="keychain" if use_keychain else f"env:{provider.env_var_name()}",
-        )
-        if prof.profile_exists(profile_name):
-            prof.save_profile(profile, allow_overwrite=True, api_key=api_key)
-        else:
-            prof.save_profile(profile, api_key=api_key)
-        if profile_name != active_name:
-            prof.set_active_profile_name(profile_name)
-        if use_keychain and api_key:
-            from .core import keychain as kc
-            kc.keychain_set(provider.keychain_server(), api_key)
     cli_flag = args.conflict if args.conflict and args.conflict != "prompt" else None
 
-    def _pick(target) -> str:
+    def _pick(target) -> tuple[str, bool]:
         if cli_flag == "append" and not supports_append(target.name):
             raise _ConflictRejected(
                 f"--conflict append is not supported for {target.display_name} "
@@ -691,8 +677,8 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
                 f"Use --conflict replace or --conflict skip."
             )
         existing_names = target.current_provider_names()
-        has_collision = (
-            bool(existing_names) and provider.provider_name in existing_names
+        has_collision = bool(existing_names) and (
+            provider.provider_name in existing_names or target.name == "codex"
         )
         decided = resolve_conflict_action(
             target.name,
@@ -701,11 +687,11 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
             conflict_flag=cli_flag,
         )
         if decided is not None:
-            return decided.value
+            return decided.value, has_collision
         options = ["replace", "skip"]
         if supports_append(target.name):
             options.append("append")
-        return prompt.choose_action(target.display_name, options, default="replace")
+        return prompt.choose_action(target.display_name, options, default="replace"), has_collision
 
     install_approved = True
     if not args.skip_install and not args.dry_run and not non_interactive:
@@ -723,10 +709,14 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
     configured_count = 0
     configured_warp = False
     exported_shell_env = False
+    profile_saved = False
 
     for target in targets:
         try:
-            conflict_action = _pick(target)
+            conflict_action, has_collision = _pick(target)
+            if conflict_action == "skip" and has_collision and target.name in {"claude", "codex"}:
+                prompt.step(target.display_name, "unchanged", status="skip")
+                continue
             was_installed = target.is_installed()
             if not was_installed and not args.skip_install and not args.dry_run:
                 if not install_approved:
@@ -744,6 +734,20 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
             target_provider = provider
             if target.name == "zed" and not non_interactive and conflict_action != "skip":
                 target_provider = wizard.configure_zed_features(provider)
+            if not args.dry_run and not profile_saved:
+                profile = prof.profile_from_provider(
+                    provider, name=profile_name,
+                    api_key_ref="keychain" if use_keychain else f"env:{provider.env_var_name()}",
+                )
+                prof.save_profile(
+                    profile, allow_overwrite=prof.profile_exists(profile_name), api_key=api_key
+                )
+                if profile_name != active_name:
+                    prof.set_active_profile_name(profile_name)
+                if use_keychain and api_key:
+                    from .core import keychain as kc
+                    kc.keychain_set(provider.keychain_server(), api_key)
+                profile_saved = True
 
             if args.dry_run:
                 target.configure(

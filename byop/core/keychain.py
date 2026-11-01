@@ -128,7 +128,9 @@ def keychain_delete(server: str, account: str = "Bearer") -> None:
 
 
 def env_var_export_line(env_var: str, api_key: str) -> str:
-    return f'export {env_var}="{api_key}"'
+    if "\n" in api_key or "\r" in api_key:
+        raise ValueError("API key must not contain line breaks.")
+    return f"export {env_var}={shlex.quote(api_key)}"
 
 
 def profile_candidates() -> list[Path]:
@@ -204,13 +206,14 @@ def ensure_key(
     environment variables work without storing plaintext secrets on disk.
     """
 
+    env_line = env_var_export_line(env_var, api_key) if use_env else None
     notes: list[str] = []
     if use_keychain:
         keychain_set(server, api_key)
         log(f"Stored API key in login keychain (server={server}).")
         notes.append(f"keychain:{server}")
     if use_env:
-        path = write_env_to_profile(env_var, api_key)
+        path = write_env_to_profile(env_var, api_key, raw_line=env_line)
         log(f"Exported {env_var} in {path}.")
         notes.append(f"env:{path}")
     elif use_keychain and keychain_env:
