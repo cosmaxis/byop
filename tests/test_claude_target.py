@@ -116,6 +116,38 @@ def test_custom_gateway_model_limits_refresh_without_replacing_role_mappings(tmp
         assert data["permissions"] == {"allow": ["Read"]}
 
 
+@pytest.mark.parametrize("mode,classifier,expected_mode,expected_classifier", [
+    (None, None, "auto", "existing-classifier"),
+    ("manual", None, "default", "existing-classifier"),
+    ("auto", " claude-sonnet-4-6 ", "auto", "claude-sonnet-4-6"),
+    (None, "claude-sonnet-4-6", "auto", "claude-sonnet-4-6"),
+])
+def test_permission_configuration_is_explicit_and_preserves_safety_rules(
+    tmp_path, mode, classifier, expected_mode, expected_classifier,
+):
+    settings = tmp_path / "settings.json"
+    rules = {"allow": ["Read"], "deny": ["Bash(rm *)"]}
+    settings.write_text(json.dumps({
+        "permissions": {**rules, "defaultMode": "auto"},
+        "env": {"CLAUDE_CODE_AUTO_MODE_MODEL": "existing-classifier"},
+    }))
+    target = ClaudeTarget(settings, permission_mode=mode, auto_mode_model=classifier)
+    target.configure(_provider(), use_keychain=False, log=lambda _: None)
+    data = json.loads(settings.read_text())
+    assert data["permissions"] == {**rules, "defaultMode": expected_mode}
+    assert data["env"]["CLAUDE_CODE_AUTO_MODE_MODEL"] == expected_classifier
+    assert data["model"] == "hy3"
+
+
+@pytest.mark.parametrize("options", [
+    {"permission_mode": "bypassPermissions"},
+    {"auto_mode_model": "   "},
+])
+def test_invalid_permission_configuration_is_rejected(options):
+    with pytest.raises(ValueError):
+        ClaudeTarget(**options)
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS keychain required")
 def test_configure_first_run_stores_key_before_building_fragment(tmp_path):
     """First run (keychain initially empty) must store key first, then write apiKeyHelper."""

@@ -41,8 +41,20 @@ class ClaudeTarget:
     name = "claude"
     display_name = "Claude Code"
 
-    def __init__(self, settings_path: Path = DEFAULT_SETTINGS_PATH) -> None:
+    def __init__(
+        self,
+        settings_path: Path = DEFAULT_SETTINGS_PATH,
+        *,
+        permission_mode: str | None = None,
+        auto_mode_model: str | None = None,
+    ) -> None:
+        if permission_mode not in (None, "manual", "auto"):
+            raise ValueError("Claude permission mode must be manual or auto.")
+        if auto_mode_model is not None and not auto_mode_model.strip():
+            raise ValueError("Claude classifier model must not be empty.")
         self.settings_path = settings_path
+        self.permission_mode = permission_mode
+        self.auto_mode_model = auto_mode_model.strip() if auto_mode_model is not None else None
 
     # ------------------------------------------------------------------
     # Install / detection
@@ -109,6 +121,12 @@ class ClaudeTarget:
             "env": env,
             "model": primary.name,
         }
+        if self.permission_mode is not None:
+            fragment["permissions"] = {
+                "defaultMode": "default" if self.permission_mode == "manual" else "auto"
+            }
+        if self.auto_mode_model is not None:
+            env["CLAUDE_CODE_AUTO_MODE_MODEL"] = self.auto_mode_model
         helper = self._api_key_helper(provider, use_keychain=use_keychain)
         if helper is not None:
             fragment["apiKeyHelper"] = helper
@@ -227,6 +245,11 @@ class ClaudeTarget:
         merged_env.update(fragment["env"])
         merged["env"] = merged_env
         merged["model"] = fragment["model"]
+        if "permissions" in fragment:
+            merged["permissions"] = {
+                **current.get("permissions", {}),
+                **fragment["permissions"],
+            }
 
         self._write(merged)
         log(f"Updated Claude Code settings at {self.settings_path}")

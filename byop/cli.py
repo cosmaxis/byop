@@ -166,6 +166,16 @@ def _add_apply_args(p: argparse.ArgumentParser) -> None:
         help="Explicit OMP models.yml path (overrides --profile).",
     )
     p.add_argument(
+        "--claude-permission-mode",
+        choices=["manual", "auto"],
+        help="Claude only: manual uses human approvals; auto uses safety classification. Omit to preserve.",
+    )
+    p.add_argument(
+        "--claude-auto-mode-model",
+        type=str.strip,
+        help="Claude only: explicit safety classifier model (not the main model). Requires Claude 2.1.302+. Does not enable auto mode.",
+    )
+    p.add_argument(
         "--config-file",
         type=Path,
         help="Path to a JSON file with provider fields (provider_name, "
@@ -513,6 +523,9 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
     # top-level flag. The apply subparser doesn't declare it; default it.
     if getattr(args, "export_config", False):
         return _run_export(args)
+    if getattr(args, "claude_auto_mode_model", None) == "":
+        prompt.error("--claude-auto-mode-model must not be empty.")
+        return 2
 
     # Resolve provider either from --config-file, from CLI flags, from the
     # active profile (in that order), or fall through to the wizard.
@@ -1099,6 +1112,9 @@ def _select_targets(args, *, interactive: bool) -> list:
         target_kwargs["omp_profile"] = args.omp_profile
     if getattr(args, "omp_models_path", None) is not None:
         target_kwargs["omp_models_path"] = args.omp_models_path
+    for option in ("claude_permission_mode", "claude_auto_mode_model"):
+        if getattr(args, option, None) is not None:
+            target_kwargs[option] = getattr(args, option)
     all_targets = available_targets(**target_kwargs)
     by_name = {t.name: t for t in all_targets}
 

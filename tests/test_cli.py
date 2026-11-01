@@ -11,6 +11,13 @@ from byop.core import keychain as kc
 from byop.core import profiles as prof
 
 
+def test_empty_claude_classifier_rejected_before_profile_or_secret_writes(monkeypatch, tmp_path):
+    config = tmp_path / "byop"
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(config))
+    assert cli.main(["apply", "--claude-auto-mode-model", "   "]) == 2
+    assert not config.exists()
+
+
 def test_cli_dry_run_non_interactive(monkeypatch):
     calls = {"install": 0, "configure": 0}
 

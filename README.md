@@ -76,6 +76,39 @@ BYOP does not disable compaction, spoof model families, grant model allowlist ac
 or infer thinking/vision support. Older Claude versions may ignore these settings;
 upgrade if `/context` does not show the configured window.
 
+#### Claude Auto-mode safety classifier
+
+The coding model and Auto-mode safety classifier are separate. Choosing `pro`
+does not guarantee that background safety checks use `pro`; Claude can call
+Sonnet separately with the same API key. A failed classifier blocks the tool,
+not necessarily the main model.
+
+Add one of these choices to your normal Claude setup invocation:
+
+```bash
+# Human approvals; avoids Auto-mode classifier requests.
+byop apply --target claude --claude-permission-mode manual
+
+# Keep automatic safety review with an explicitly selected classifier.
+byop apply --target claude --claude-permission-mode auto \
+  --claude-auto-mode-model claude-sonnet-4-6
+```
+
+Manual writes `permissions.defaultMode: "default"` (Claude's Manual value),
+not bypass mode. Auto writes `"auto"`; the classifier option writes
+`env.CLAUDE_CODE_AUTO_MODE_MODEL` and requires Claude Code 2.1.302 or later.
+Supplying only the classifier option does not enable Auto mode.
+Omitting both options preserves the existing permission mode and classifier.
+Allow/deny rules are preserved; `--conflict skip` leaves existing matching settings unchanged.
+These are per-invocation target options, not saved provider-profile fields.
+
+Restart Claude after applying. Session flags, project/managed policy, and resumed
+session state can override the user-level default. Do not turn off safety checks
+or assume a GPT-backed gateway alias is a compatible classifier: select a model
+your Claude version supports and verify gateway access, key policy, billing, and
+an actual tool safety check. Setting the option alone does not prove availability.
+See [Claude's classifier documentation](https://code.claude.com/docs/en/permission-modes#choose-the-classifier-model).
+
 ### Warp
 
 `byop --target warp --skip-install` configures a custom endpoint using **OpenAI Chat Completions**. Supply provider details in the wizard, or apply an existing profile with `byop apply --target warp --skip-install`. Use `https://api.cosmaxis.com/v1` and model `pro` for the Cosmaxis setup verified on Warp `0.2026.10.21.08.25.02`.
