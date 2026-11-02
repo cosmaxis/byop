@@ -415,6 +415,13 @@ def ask(
             return val
         warn(f"{prompt} is required.")
 
+def mask_secret(value: str) -> str:
+    """Show a recognizable fragment without exposing short or unsafe secrets."""
+    if len(value) < 15 or not value.isascii() or not value.isprintable():
+        return "****"
+    return f"{value[:7]}****{value[-4:]}"
+
+
 def ask_secret(prompt: str, *, hint: str = "", allow_empty: bool = False) -> str:
     while True:
         if _use_ansi():
@@ -425,8 +432,11 @@ def ask_secret(prompt: str, *, hint: str = "", allow_empty: bool = False) -> str
             prefix = f"› {prompt}{suffix}: "
         val = _strip_escape_chars(getpass.getpass(prefix)).strip()
         if val or allow_empty:
-            shown = "••••••••" if val else "kept existing"
-            _collapse_input_line(prompt, shown)
+            shown = mask_secret(val) if val else "kept existing"
+            if _is_tty() and _use_ansi():
+                _collapse_input_line(prompt, shown)
+            else:
+                print(f"{prompt}: {shown}")
             return val
         warn(f"{prompt} is required.")
 
