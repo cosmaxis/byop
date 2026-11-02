@@ -8,7 +8,9 @@ Configure one LLM provider across your macOS coding tools. Byop saves reusable p
 curl -sfS https://byop.cosmaxis.com/install | sh
 ```
 
-The [installer](install.sh) installs byop and, if needed, Homebrew, Python 3.11+, Git, and pipx. Homebrew may request administrator access. If `byop` is not on your PATH, use the path printed by the installer.
+The [installer](install.sh) downloads a version-pinned wheel from Cloudflare, verifies its SHA-256, and installs it with pipx. It installs Homebrew, Python 3.11+, and pipx if needed; Homebrew may request administrator access. Python dependencies may be downloaded from PyPI. If `byop` is not on your PATH, use the path printed by the installer.
+
+Releases are published to R2 by CI after tests and builds pass. To roll back, run the CI workflow on `master` with `rollback_version` set to a previously published R2 version; CI verifies its artifacts before updating the latest pointer. The checksum detects corrupted downloads, not compromise of the release origin.
 
 ## Get started
 

@@ -7,3 +7,7 @@ compatibility_date = "2024-01-01"
 routes = [
   { pattern = "byop.cosmaxis.com", custom_domain = true }
 ]
+
+[[r2_buckets]]
+binding = "RELEASES"
+bucket_name = "byop-releases"

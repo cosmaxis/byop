@@ -1,83 +1,117 @@
-export default {
-  async fetch(request) {
-    const url = new URL(request.url);
-    const path = url.pathname;
-    const REPO = "Cosmaxis/byop";
+const NO_STORE = { "Cache-Control": "no-store" };
+const IMMUTABLE = { "Cache-Control": "public, max-age=31536000, immutable" };
+const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+$/;
+const SHA256 = /^[a-f0-9]{64}$/;
 
-    // Resolve the latest release tag so installs are pinned to immutable
-    // content (no stale CDN cache); fall back to the default branch.
-    let version = "latest";
-    try {
-      const release = await fetch(
-        `https://api.github.com/repos/${REPO}/releases/latest`,
-        {
-          headers: { "User-Agent": "byop-worker" },
-          cf: { cacheTtl: 60 },
-        },
-      );
-      if (release.ok) {
-        const data = await release.json();
-        version = data.tag_name || "latest";
-      }
-    } catch {
-      // fall through with 'latest'
+function error(status, message) {
+  return new Response(message, {
+    status,
+    headers: { "Content-Type": "text/plain;charset=utf-8", ...NO_STORE },
+  });
+}
+
+async function parseManifest(object) {
+  if (!object) return null;
+  try {
+    const manifest = JSON.parse(await object.text());
+    if (
+      !manifest ||
+      typeof manifest.version !== "string" ||
+      typeof manifest.sha256 !== "string" ||
+      typeof manifest.wheel !== "string" ||
+      !VERSION.test(manifest.version) ||
+      !SHA256.test(manifest.sha256) ||
+      manifest.wheel !== `byop-${manifest.version}-py3-none-any.whl`
+    ) return null;
+    return {
+      version: manifest.version,
+      sha256: manifest.sha256,
+      wheel: manifest.wheel,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export default {
+  async fetch(request, env) {
+    const path = new URL(request.url).pathname;
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return new Response("Method not allowed", {
+        status: 405,
+        headers: { Allow: "GET, HEAD", ...NO_STORE },
+      });
     }
 
-    const ref = version !== "latest" ? version : "master";
-    const base = `https://raw.githubusercontent.com/${REPO}/${ref}`;
-
-    const routes = {
-      "/install": `${base}/install.sh`,
-      "/install.sh": `${base}/install.sh`,
-    };
-
+    const head = request.method === "HEAD";
     if (path === "/") {
-      const displayVersion = version.replace(/^v/, "");
-      return new Response(
-        `byop — Bring Your Own Provider ${version !== "latest" ? "v" + displayVersion : ""}
-
-Wire a custom OpenAI-compatible LLM provider into Zed, py.dev, and more.
+      const body = `byop — Bring Your Own Provider
 
 Install (macOS):
   curl -sfS https://byop.cosmaxis.com/install | sh
 
 Then run:
   byop
-
-Documentation: https://github.com/${REPO}
-`,
-        { headers: { "Content-Type": "text/plain;charset=utf-8" } },
-      );
+`;
+      return new Response(head ? null : body, {
+        headers: { "Content-Type": "text/plain;charset=utf-8", ...NO_STORE },
+      });
     }
 
-    const targetUrl = routes[path];
-    if (!targetUrl) {
-      return new Response("Not found", { status: 404 });
+    const alias = path === "/install" || path === "/install.sh";
+    const manifestRoute = path === "/latest.json";
+    const release = /^\/releases\/([0-9]+\.[0-9]+\.[0-9]+)\/(install\.sh|manifest\.json|byop-[0-9]+\.[0-9]+\.[0-9]+-py3-none-any\.whl)$/.exec(path);
+    if (!alias && !manifestRoute && !release) return error(404, "Not found");
+    if (release && release[2] !== "install.sh" && release[2] !== "manifest.json" &&
+      release[2] !== `byop-${release[1]}-py3-none-any.whl`) {
+      return error(404, "Not found");
     }
+    if (!env?.RELEASES) return error(503, "Release storage unavailable");
 
     try {
-      const response = await fetch(targetUrl, {
-        cf: { cacheTtl: 60, cacheEverything: true },
-      });
-      if (!response.ok) {
-        return new Response(`Upstream error: ${response.status}`, {
-          status: 502,
-          headers: { "Content-Type": "text/plain;charset=utf-8" },
+      let key;
+      let cache;
+      let contentType;
+      if (alias || manifestRoute) {
+        const manifest = await parseManifest(await env.RELEASES.get("latest.json"));
+        if (!manifest) return error(503, "Release metadata unavailable");
+        if (manifestRoute) {
+          const body = JSON.stringify(manifest);
+          return new Response(head ? null : body, {
+            headers: { "Content-Type": "application/json;charset=utf-8", ...NO_STORE },
+          });
+        }
+        key = `releases/${manifest.version}/install.sh`;
+        cache = NO_STORE;
+        contentType = "text/plain;charset=utf-8";
+      } else {
+        key = `releases/${release[1]}/${release[2]}`;
+        cache = IMMUTABLE;
+        contentType = release[2] === "install.sh"
+          ? "text/plain;charset=utf-8"
+          : release[2] === "manifest.json"
+            ? "application/json;charset=utf-8"
+            : "application/octet-stream";
+      }
+
+      const object = await env.RELEASES.get(key);
+      if (!object) {
+        return error(alias ? 503 : 404, alias ? "Release installer unavailable" : "Not found");
+      }
+      if (release?.[2] === "manifest.json") {
+        const manifest = await parseManifest(object);
+        if (!manifest || manifest.version !== release[1]) {
+          return error(503, "Release metadata unavailable");
+        }
+        return new Response(head ? null : JSON.stringify(manifest), {
+          headers: { "Content-Type": contentType, ...cache },
         });
       }
-      return new Response(response.body, {
-        status: response.status,
-        headers: {
-          "Content-Type": "text/plain;charset=utf-8",
-          "Cache-Control": "public, max-age=60",
-          "Access-Control-Allow-Origin": "*",
-        },
+      return new Response(head ? null : object.body, {
+        headers: { "Content-Type": contentType, ...cache },
       });
     } catch {
-      return new Response("Failed to fetch upstream resource", {
-        status: 502,
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-      });
+      return error(503, "Release storage unavailable");
     }
   },
 };

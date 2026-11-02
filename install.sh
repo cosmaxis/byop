@@ -12,8 +12,9 @@ set -e
 # https://github.com/Cosmaxis/byop
 # =============================================================================
 
-REPO="Cosmaxis/byop"
-BYOP_REPO_URL="${BYOP_REPO_URL:-https://github.com/${REPO}.git}"
+BYOP_BASE_URL="${BYOP_BASE_URL:-https://byop.cosmaxis.com}"
+BYOP_BASE_URL="${BYOP_BASE_URL%/}"
+BYOP_PINNED_VERSION=""
 
 # Colors
 RED='\033[0;31m'
@@ -55,12 +56,6 @@ find_python() {
     return 1
 }
 
-# Resolve the latest release tag (falls back to the default branch).
-latest_tag() {
-    curl -sfS "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
-        | grep '"tag_name"' | head -1 \
-        | sed 's/.*"tag_name" *: *"//;s/".*//'
-}
 
 # =============================================================================
 # Main
@@ -123,22 +118,7 @@ if [ -z "$PY" ]; then
     fi
 fi
 info "${CHECK} Python: ${BOLD}$("$PY" --version 2>&1)${NC}"
-printf "%b\n" "${DIM}[2/4] Checking Git${NC}"
-
-# Git is needed by pipx to install from the Git repository. On macOS,
-# /usr/bin/git can exist as an unusable Command Line Tools placeholder.
-if ! git --version >/dev/null 2>&1; then
-    ensure_brew
-    info "${WARN} Git not found; installing it via Homebrew..."
-    brew install git || die "Failed to install Git via Homebrew. See the errors above."
-    PATH="$(brew --prefix)/bin:$PATH"
-    export PATH
-    hash -r
-    git --version >/dev/null 2>&1 || die "Git was installed but could not be run."
-fi
-info "${CHECK} Git is available."
-
-printf "%b\n" "${DIM}[3/4] Checking pipx${NC}"
+printf "%b\n" "${DIM}[2/4] Checking pipx${NC}"
 # --- pipx (isolated install, including byop's Python dependencies) --------
 if ! command -v pipx >/dev/null 2>&1; then
     ensure_brew
@@ -150,25 +130,64 @@ if ! command -v pipx >/dev/null 2>&1; then
     command -v pipx >/dev/null 2>&1 || die "pipx was installed but could not be found on PATH."
 fi
 pipx ensurepath >/dev/null 2>&1 || true
+printf "%b\n" "${DIM}[3/4] Downloading release${NC}"
 
-# --- Determine version to install ------------------------------------------
-TAG="$(latest_tag)"
-if [ -n "$TAG" ]; then
-    SOURCE="git+${BYOP_REPO_URL}@${TAG}"
-    info "${CHECK} Latest release: ${BOLD}${TAG}${NC}"
-else
-    SOURCE="git+${BYOP_REPO_URL}"
-    TAG="(default branch)"
-    info "${WARN} Could not detect a release; installing from the default branch."
+# --- Download and verify the published wheel -------------------------------
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/byop.XXXXXXXX")" || die "Could not create a temporary download directory."
+trap 'rm -rf -- "$TMP_DIR"' EXIT
+trap 'exit 1' HUP INT TERM
+MANIFEST_URL="$BYOP_BASE_URL/latest.json"
+if [ -n "$BYOP_PINNED_VERSION" ]; then
+    "$PY" -c 'import re, sys; sys.exit(0 if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", sys.argv[1]) else 1)' \
+        "$BYOP_PINNED_VERSION" || die "Invalid pinned release version; no package was installed."
+    MANIFEST_URL="$BYOP_BASE_URL/releases/$BYOP_PINNED_VERSION/manifest.json"
 fi
+curl -fsSL "$MANIFEST_URL" -o "$TMP_DIR/manifest.json" \
+    || die "Could not download the release manifest. Check your network connection; no package was installed."
+
+METADATA="$("$PY" -c '
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        manifest = json.load(source)
+    version, sha256, wheel = (manifest[key] for key in ("version", "sha256", "wheel"))
+    if not (
+        isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version)
+        and isinstance(sha256, str) and re.fullmatch(r"[0-9a-f]{64}", sha256)
+        and isinstance(wheel, str) and wheel == f"byop-{version}-py3-none-any.whl"
+        and (not sys.argv[2] or version == sys.argv[2])
+    ):
+        sys.exit(1)
+except (OSError, ValueError, KeyError, TypeError):
+    sys.exit(1)
+print(version, sha256, wheel)
+' "$TMP_DIR/manifest.json" "$BYOP_PINNED_VERSION")" || die "Invalid release manifest; no package was installed."
+read -r VERSION SHA256 WHEEL <<EOF
+$METADATA
+EOF
+WHEEL_PATH="$TMP_DIR/$WHEEL"
+info "${CHECK} Release: ${BOLD}${VERSION}${NC}"
+curl -fsSL "$BYOP_BASE_URL/releases/$VERSION/$WHEEL" -o "$WHEEL_PATH" \
+    || die "Could not download the release wheel. Check your network connection; no package was installed."
+"$PY" -c '
+import hashlib
+import sys
+
+with open(sys.argv[1], "rb") as wheel:
+    digest = hashlib.file_digest(wheel, "sha256").hexdigest()
+sys.exit(0 if digest == sys.argv[2] else 1)
+' "$WHEEL_PATH" "$SHA256" || die "Release wheel checksum mismatch; no package was installed."
 
 printf "\n"
-printf "%b\n" "${DIM}[4/4] Installing byop ${TAG}${NC}"
+printf "%b\n" "${DIM}[4/4] Installing byop ${VERSION}${NC}"
 
-if pipx install --force --python "$PY" "$SOURCE"; then
+if pipx install --force --python "$PY" "$WHEEL_PATH"; then
     info "${CHECK} Installed with pipx and its Python dependencies"
 else
-    die "pipx install failed. Check the errors above and retry: pipx install --python \"$PY\" \"$SOURCE\""
+    die "pipx install failed. Check the errors above and retry the installer."
 fi
 
 # --- Verify ----------------------------------------------------------------
