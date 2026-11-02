@@ -34,7 +34,7 @@ async function parseManifest(object) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const path = new URL(request.url).pathname;
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("Method not allowed", {
@@ -67,6 +67,28 @@ Then run:
       return error(404, "Not found");
     }
     if (!env?.RELEASES) return error(503, "Release storage unavailable");
+
+    // Versioned objects never change, so cache them at the Cloudflare edge.
+    const edgeCache = release && !head && ctx ? globalThis.caches?.default : null;
+    const cacheKey = edgeCache ? new Request(new URL(path, request.url).toString()) : null;
+    if (edgeCache) {
+      try {
+        const cached = await edgeCache.match(cacheKey);
+        if (cached) return cached;
+      } catch {
+        // An unavailable cache must not block a release stored in R2.
+      }
+    }
+    const respond = (response) => {
+      if (edgeCache) {
+        try {
+          ctx.waitUntil(edgeCache.put(cacheKey, response.clone()).catch(() => {}));
+        } catch {
+          // Serving a release does not depend on populating the cache.
+        }
+      }
+      return response;
+    };
 
     try {
       let key;
@@ -103,13 +125,13 @@ Then run:
         if (!manifest || manifest.version !== release[1]) {
           return error(503, "Release metadata unavailable");
         }
-        return new Response(head ? null : JSON.stringify(manifest), {
+        return respond(new Response(head ? null : JSON.stringify(manifest), {
           headers: { "Content-Type": contentType, ...cache },
-        });
+        }));
       }
-      return new Response(head ? null : object.body, {
+      return respond(new Response(head ? null : object.body, {
         headers: { "Content-Type": contentType, ...cache },
-      });
+      }));
     } catch {
       return error(503, "Release storage unavailable");
     }

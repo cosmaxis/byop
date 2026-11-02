@@ -68,6 +68,32 @@ const versionedManifest = await request(`/releases/${version}/manifest.json`);
 assert.match(versionedManifest.headers.get('content-type'), /^application\/json/);
 assert.deepEqual(keys.slice(0, 2), ['latest.json', 'latest.json']);
 assert.equal(keys.at(-1), `releases/${version}/manifest.json`);
+
+const edge = new Map();
+const writes = [];
+globalThis.caches = { default: {
+  async match(req) { return edge.get(req.url)?.clone(); },
+  async put(req, response) { edge.set(req.url, response); },
+} };
+const ctx = { waitUntil(promise) { writes.push(promise); } };
+const edgeFetch = (path) => worker.fetch(new Request(`https://byop.cosmaxis.com${path}`), env, ctx);
+const wheelPath = `/releases/${version}/${wheel}`;
+assert.equal(await (await edgeFetch(wheelPath)).text(), 'wheel bytes');
+await Promise.all(writes);
+const cachedReads = keys.length;
+objects.delete(`releases/${version}/${wheel}`);
+assert.equal(await (await edgeFetch(wheelPath)).text(), 'wheel bytes');
+assert.equal(keys.length, cachedReads);
+objects.set(`releases/${version}/${wheel}`, 'wheel bytes');
+const next = { version: '2.1.12', sha256, wheel: 'byop-2.1.12-py3-none-any.whl' };
+objects.set('latest.json', JSON.stringify(next));
+assert.equal((await (await edgeFetch('/latest.json')).json()).version, '2.1.12');
+objects.set('latest.json', JSON.stringify(manifest));
+assert.equal((await (await edgeFetch('/latest.json')).json()).version, version);
+globalThis.caches.default.match = async () => { throw new Error('cache unavailable'); };
+globalThis.caches.default.put = async () => { throw new Error('cache unavailable'); };
+assert.equal(await (await edgeFetch(wheelPath)).text(), 'wheel bytes');
+await Promise.all(writes);
 await check('/', 200, (await (await request('/')).text()), 'no-store');
 for (const path of [
   '/missing', '/releases/2.1.11/other.txt',
