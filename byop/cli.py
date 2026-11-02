@@ -370,6 +370,7 @@ def _run_default_landing() -> int:
                 "Add provider",
                 "Switch provider",
                 "Edit provider",
+                "Test API key",
                 "Quit",
             ],
         )
@@ -393,6 +394,22 @@ def _run_default_landing() -> int:
                 prompt.warn("No saved providers yet.")
         elif action in ("Edit provider", "Edit active provider"):
             _profile_edit_interactive()
+        elif action == "Test API key":
+            if not has_profile:
+                prompt.warn("No saved provider to test. Add a provider first.")
+                continue
+            profile = prof.load_profile(active_name)
+            prompt.info(f"Test endpoint · {profile.api_url.rstrip('/')}/models")
+            if prompt.confirm("Send the API key to this endpoint?", default=False):
+                from .core.connection import check_api_key
+
+                try:
+                    key = _load_profile_api_key(profile)
+                    with prompt.spinner("Testing API key…"):
+                        status, message = check_api_key(profile.api_url, key)
+                    prompt.step("API key check", message, status=status)
+                except RuntimeError:
+                    prompt.step("API key check", "Could not read the stored API key.", status="error")
         elif not has_profile:
             _run_first_run_wizard()
         else:
@@ -863,6 +880,8 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
             prompt.outro(f"Configured {configured_count} {noun} for {provider.provider_name}")
         else:
             prompt.outro("Nothing changed")
+    else:
+        prompt.error(f"Setup failed · {configured_count} tool(s) configured; see errors above")
     return 0 if success else 1
 
 

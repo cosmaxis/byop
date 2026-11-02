@@ -30,6 +30,17 @@ def test_strip_escape_chars_does_not_touch_legitimate_text():
     assert prompt._strip_escape_chars(payload) == payload
 
 
+def test_secret_prompt_shows_only_safe_fragments(monkeypatch, capsys):
+    key = "sk-1b82middle9cc8"
+    monkeypatch.setattr(prompt.getpass, "getpass", lambda _: key)
+    assert prompt.ask_secret("API key") == key
+    output = capsys.readouterr().out
+    assert "sk-1b82****9cc8" in output
+    assert key not in output
+    assert prompt.mask_secret("short-key") == "****"
+    assert prompt.mask_secret("sk-1234\x1b[31msecret") == "****"
+
+
 def test_arrow_menu_selects_option_and_restores_terminal():
     import os
     import pty
