@@ -69,9 +69,6 @@ def test_apply_writes_expected_settings(tmp_path):
         "model": "hy3",
     }
     assert "default_model" in reloaded["agent"]
-    # keychain server uses normalized url
-    _, kwargs = mocks["keychain"].call_args
-    assert kwargs["server"] == "https://api.example.com/v1"
 
 
 def test_apply_invalid_provider_raises(tmp_path):

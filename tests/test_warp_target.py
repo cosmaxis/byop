@@ -45,6 +45,35 @@ def test_dry_run_redacts_key_and_does_not_write(tmp_path):
     assert "secret-key-123" not in output
 
 
+def test_warp_manual_output_hides_url_query_and_fragment(tmp_path, monkeypatch):
+    monkeypatch.setattr("byop.core.targets.warp.endpoint_schema_supported", lambda: False)
+    messages = []
+    WarpTarget(tmp_path / "settings.toml").configure(
+        provider("https://api.example.com/v1?key=private-query#private-fragment"),
+        log=messages.append,
+    )
+    output = "\n".join(messages)
+    assert "https://api.example.com/v1" in output
+    assert "private-query" not in output and "private-fragment" not in output
+    assert "Copy the full endpoint URL" in output
+
+
+def test_warp_reports_unsupported_limits_for_differing_models(tmp_path):
+    config = ProviderConfig("Demo", "https://api.example.com/v1", "secret-key-123", [
+        ModelConfig("small", max_tokens=64000, max_output_tokens=4096),
+        ModelConfig("large", max_tokens=256000, max_output_tokens=16384),
+    ])
+    messages: list[str] = []
+    path = tmp_path / "settings.toml"
+    WarpTarget(path).configure(config, dry_run=True, log=messages.append)
+    assert not path.exists()
+    assert any("no context-window or output-token limit fields" in m for m in messages)
+    WarpTarget(path).configure(config, log=messages.append)
+    assert any("no context-window or output-token limit fields" in m for m in messages)
+    assert all(set(model) == {"name", "alias", "config_key"}
+               for model in load(path)["agents"]["custom_endpoints"].popitem()[1]["models"])
+
+
 def test_configure_preserves_comments_and_settings_and_stores_key(tmp_path):
     path = tmp_path / "settings.toml"
     path.write_text('# Keep this comment\n[appearance]\nspacing = "compact"\n')

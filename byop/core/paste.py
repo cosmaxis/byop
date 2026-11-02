@@ -12,13 +12,9 @@ block comments) so users can copy a fragment out of an existing
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
-from .config import ModelConfig, ProviderConfig
-
-# Match the provider's JSON shape — must be multi-line AND contain a brace.
-_PASTE_HINT = re.compile(r"\{[\s\S]*\}")
+from .config import DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TOKENS, ModelConfig, ProviderConfig
 
 
 def _strip_jsonc_comments(text: str) -> str:
@@ -87,29 +83,40 @@ def looks_like_provider_paste(text: str) -> bool:
     return isinstance(parsed, dict)
 
 def _coerce_model(raw: dict[str, Any]) -> ModelConfig:
-    """Normalize a per-model dict into a ModelConfig.
-
-    Accepts either ``name`` or ``id`` as the model id; ``max_tokens`` or
-    ``context_window``; ``max_output_tokens`` or ``max_tokens_out``.
-    """
-    name = raw.get("name") or raw.get("id")
+    """Normalize canonical, Pi, and OpenCode model limit fields."""
+    name = raw.get("id") or raw.get("name")
     if not name:
-        raise ValueError(f"model entry missing 'name' (or 'id'): {raw!r}")
-    max_tokens = raw.get("max_tokens", raw.get("context_window", 128000))
-    max_output_tokens = raw.get(
-        "max_output_tokens", raw.get("max_tokens_out", 32000)
+        raise ValueError("model entry missing 'name' (or 'id')")
+
+    raw_limits = raw.get("limit")
+    limits: dict[str, Any] = raw_limits if isinstance(raw_limits, dict) else {}
+    context = raw.get("context_window", raw.get("contextWindow", limits.get("context")))
+    max_tokens: Any = context if context is not None else raw.get("max_tokens", DEFAULT_MAX_TOKENS)
+    output_default = raw.get("max_tokens", DEFAULT_MAX_OUTPUT_TOKENS) if context is not None else DEFAULT_MAX_OUTPUT_TOKENS
+    max_output_tokens: Any = raw.get(
+        "max_output_tokens",
+        raw.get("max_tokens_out", raw.get("maxTokens", limits.get("output", output_default))),
     )
-    display = raw.get("display_name")
+    display = raw.get("display_name") or (raw.get("name") if raw.get("id") else None)
     reasoning = raw.get("reasoning_effort")
     caps_raw = raw.get("capabilities")
-    capabilities: dict[str, Any] = (
-        dict(caps_raw) if isinstance(caps_raw, dict) else {}
-    )
+    capabilities: dict[str, Any] = dict(caps_raw) if isinstance(caps_raw, dict) else {}
+    if isinstance(raw.get("input"), list):
+        capabilities.setdefault("images", "image" in raw["input"])
+    if isinstance(raw.get("attachment"), bool):
+        capabilities.setdefault("images", raw["attachment"])
+    if isinstance(raw.get("tool_call"), bool):
+        capabilities.setdefault("tools", raw["tool_call"])
+    try:
+        max_tokens = int(max_tokens)
+        max_output_tokens = int(max_output_tokens)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("Model context and output limits must be integers.") from None
     return ModelConfig(
         name=name,
         display_name=display,
-        max_tokens=int(max_tokens),
-        max_output_tokens=int(max_output_tokens),
+        max_tokens=max_tokens,
+        max_output_tokens=max_output_tokens,
         reasoning_effort=reasoning,
         capabilities=capabilities,
     )
@@ -158,7 +165,7 @@ def parse_provider_paste(text: str) -> tuple[ProviderConfig, list[str]]:
     if not provider_name:
         missing.append("provider_name")
 
-    api_url = data.get("api_url") or data.get("apiUrl")
+    api_url = data.get("api_url") or data.get("apiUrl") or data.get("base_url") or data.get("baseUrl")
     if not api_url:
         missing.append("api_url")
 
@@ -168,13 +175,29 @@ def parse_provider_paste(text: str) -> tuple[ProviderConfig, list[str]]:
 
     raw_models = data.get("models")
     models: list[ModelConfig]
-    if not isinstance(raw_models, list) or not raw_models:
+    if raw_models is None or raw_models == [] or raw_models == {}:
         missing.append("models")
         models = [ModelConfig(name=_missing_str())]
+    elif isinstance(raw_models, list):
+        models = []
+        for model in raw_models:
+            if isinstance(model, str) and model.strip():
+                models.append(ModelConfig(name=model.strip()))
+            elif isinstance(model, dict):
+                models.append(_coerce_model(model))
+            else:
+                raise ValueError("Each model must be an ID string or an object.")
+    elif isinstance(raw_models, dict):
+        models = []
+        for model_id, details in raw_models.items():
+            if not isinstance(details, dict):
+                raise ValueError("Each model in the models object must be an object.")
+            model = {**details, "id": model_id}
+            if "display_name" not in model and details.get("name"):
+                model["display_name"] = details["name"]
+            models.append(_coerce_model(model))
     else:
-        models = [_coerce_model(m) for m in raw_models if isinstance(m, dict)]
-        if not models:
-            missing.append("models")
+        raise ValueError("Models must be an array or an object keyed by model ID.")
 
     cfg = ProviderConfig(
         provider_name=provider_name or _missing_str(),

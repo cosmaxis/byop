@@ -45,29 +45,6 @@ def test_keychain_get_returns_none_on_item_not_found():
         assert kc.keychain_get("https://x/v1") is None
 
 
-def test_keychain_set_calls_add_and_delete():
-    calls = []
-
-    def _run(cmd, *a, **k):
-        calls.append(cmd)
-
-        class R:
-            pass
-
-        r = R()
-        r.returncode = 0
-        r.stdout = ""
-        r.stderr = ""
-        return r
-
-    with mock.patch.object(kc, "_run", _run):
-        kc.keychain_set("https://x/v1", "sk-abc")
-    # delete then add must both be issued
-    delete = [c for c in calls if c[0:2] == ["security", "delete-internet-password"]]
-    add = [c for c in calls if c[0:2] == ["security", "add-internet-password"]]
-    assert delete and add
-    assert "sk-abc" in add[0]
-    assert "https://x/v1" in add[0]
 
 
 def test_keychain_set_raises_on_failure():
@@ -218,31 +195,6 @@ def test_keychain_has_returns_false_on_item_not_found():
         assert kc.keychain_has("https://api.example.com/v1") is False
 
 
-def test_keychain_set_swallows_missing_entry_on_pretend_delete():
-    """A missing prior entry is benign — delete returns 44, set still proceeds."""
-    seen_delete = {"called": False}
-
-    def _run(cmd, *a, **k):
-        class R:
-            pass
-
-        r = R()
-        r.stdout = ""
-        r.stderr = ""
-        if cmd[1] == "delete-internet-password":
-            seen_delete["called"] = True
-            r.returncode = kc._SECURITY_ITEM_NOT_FOUND
-        else:
-            r.returncode = 0
-        return r
-
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as td, \
-         mock.patch.object(kc, "_run", _run), \
-         mock.patch.object(kc, "LOGIN_KEYCHAIN", f"{td}/kc.db"):
-        kc.keychain_set("https://api.example.com/v1", "sk-x")
-    assert seen_delete["called"] is True
 
 
 def test_keychain_delete_raises_on_unexpected_exit_code():

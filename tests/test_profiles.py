@@ -91,6 +91,16 @@ def test_save_and_load_round_trip(isolated_config):
     assert loaded.updated_at
 
 
+def test_keychain_and_shell_export_choice_round_trips(isolated_config):
+    profile = _sample_profile()
+    profile.export_env = True
+    prof.save_profile(profile)
+    loaded = prof.load_profile()
+    assert loaded.api_key_ref == "keychain"
+    assert loaded.export_env is True
+    assert "api_key" not in loaded.to_toml()
+
+
 def test_save_overwrite_guard(isolated_config):
     p = _sample_profile()
     prof.save_profile(p)

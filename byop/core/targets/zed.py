@@ -44,6 +44,40 @@ class ZedTarget:
 
         return fragment
 
+    def _ensure_key(
+        self, provider: ProviderConfig, *, use_keychain: bool, use_env: bool, log: Callable[[str], None]
+    ) -> None:
+        if not use_keychain and use_env and provider.api_key_env:
+            name = provider.env_var_name()
+            if name != provider.api_key_env:
+                alias = f'export {name}="$(printenv {provider.api_key_env})"'
+                found = False
+                for path in kc.profile_candidates():
+                    if not path.exists():
+                        continue
+                    try:
+                        lines = path.read_text(encoding="utf-8").splitlines()
+                    except OSError as exc:
+                        raise RuntimeError(f"Could not inspect shell profile {path}: {exc}") from exc
+                    for line in lines:
+                        if line.lstrip().startswith(f"export {name}="):
+                            if line.strip() != alias:
+                                raise ValueError(
+                                    f"Zed needs {name}, but {path} already exports it. "
+                                    f"Update that export to reference {provider.api_key_env}, then retry."
+                                )
+                            found = True
+                if not found:
+                    with (Path.home() / ".zshrc").open("a", encoding="utf-8") as shell:
+                        shell.write(f"\n# Added by byop for Zed\n{alias}\n")
+                log(f"Warning: Zed needs {name}; its shell export reads {provider.api_key_env}. "
+                    "Set it before opening a new terminal and launching Zed.")
+            return
+        kc.ensure_key(
+            provider.keychain_server(), provider.api_key, provider.env_var_name(),
+            log=log, use_keychain=use_keychain, use_env=use_env,
+        )
+
     def configure(
         self,
         provider: ProviderConfig,
@@ -64,10 +98,10 @@ class ZedTarget:
         if dry_run:
             log("[dry-run] Zed would write the following settings fragment:")
             log(sett.dumps(fragment))
-            log(
-                f"[dry-run] Zed would store key for server="
-                f"{provider.keychain_server()}"
-            )
+            if not use_keychain and provider.api_key_env:
+                log(f"[dry-run] Zed would reference {provider.api_key_env} through {provider.env_var_name()}.")
+            else:
+                log(f"[dry-run] Zed would store key for server={provider.keychain_server()}")
             return
 
         # When the caller chose 'skip' and there's an existing provider entry
@@ -90,14 +124,7 @@ class ZedTarget:
             if isinstance(existing_block, dict) and existing_block.get(
                 "api_url"
             ) == provider.normalized_api_url():
-                kc.ensure_key(
-                    server=provider.keychain_server(),
-                    api_key=provider.api_key,
-                    env_var=provider.env_var_name(),
-                    log=log,
-                    use_keychain=use_keychain,
-                    use_env=use_env,
-                )
+                self._ensure_key(provider, use_keychain=use_keychain, use_env=use_env, log=log)
                 log(
                     f"Skip: {provider.provider_name} already configured with "
                     f"the same api_url."
@@ -121,17 +148,10 @@ class ZedTarget:
                 f"({existing_url} -> {provider.normalized_api_url()})."
             )
         merged = sett.merge(current, fragment)
+        self._ensure_key(provider, use_keychain=use_keychain, use_env=use_env, log=log)
         sett.write_path(self.settings_path, merged)
         log(f"Updated Zed settings at {self.settings_path}")
 
-        kc.ensure_key(
-            server=provider.keychain_server(),
-            api_key=provider.api_key,
-            env_var=provider.env_var_name(),
-            log=log,
-            use_keychain=use_keychain,
-            use_env=use_env,
-        )
 
     def current_provider_names(self) -> list[str]:
         data = sett.load_path(self.settings_path)

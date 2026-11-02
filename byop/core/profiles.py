@@ -75,6 +75,7 @@ class Profile:
     use_edit_predictions: bool = False
     created_at: str = ""
     updated_at: str = ""
+    export_env: bool = False        # explicitly selected plaintext shell export
 
     # ------------------------------------------------------------------
     # Conversion
@@ -95,6 +96,10 @@ class Profile:
             set_commit_message=self.set_commit_message,
             set_thread_summary=self.set_thread_summary,
             use_edit_predictions=self.use_edit_predictions,
+            api_key_env=(
+                self.env_var or self.api_key_ref.removeprefix("env:")
+                if self.api_key_ref.startswith("env:") else None
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -117,6 +122,8 @@ class Profile:
         }
         if self.env_var:
             out["env_var"] = self.env_var
+        if self.export_env:
+            out["export_env"] = True
         if self.created_at:
             out["created_at"] = self.created_at
         if self.updated_at:
@@ -147,6 +154,7 @@ class Profile:
             api_url=api_url,
             api_key_ref=api_key_ref,
             env_var=env_var,
+            export_env=bool(data.get("export_env", False)),
             models=models,
             set_default_agent=bool(feats.get("default_agent", True)),
             set_inline_assistant=bool(feats.get("inline_assistant", True)),

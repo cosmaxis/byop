@@ -164,6 +164,41 @@ def test_codex_single_model_preserves_explicit_reasoning_off(tmp_path, effort, e
         CodexTarget(path).configure(provider, use_keychain=False, use_env=True, log=lambda _: None)
     assert tomllib.loads(path.read_text()).get("model_reasoning_effort") == expected
 
+    assert tomllib.loads(path.read_text())["model_context_window"] == 128000
+
+
+def test_codex_single_and_multiple_models_have_distinct_contexts(tmp_path):
+    target = CodexTarget(tmp_path / "config.toml")
+    single = _provider(models=[
+        ModelConfig(name="solo", max_tokens=64000, max_output_tokens=4096)
+    ])
+    assert target.build_fragment(single)["model_context_window"] == 64000
+    with mock.patch("byop.core.targets.codex.kc.ensure_key"):
+        target.configure(single, use_keychain=False, use_env=True, log=lambda _: None)
+    assert tomllib.loads(target.config_path.read_text())["model_context_window"] == 64000
+    assert "model_catalog_json" not in tomllib.loads(target.config_path.read_text())
+    multi = _provider(models=[
+        ModelConfig(name="small", max_tokens=64000, max_output_tokens=4096),
+        ModelConfig(name="large", max_tokens=256000, max_output_tokens=16384),
+    ])
+    models = target.build_catalog(multi)["models"]
+    assert [(m["context_window"], m["max_context_window"]) for m in models] == [
+        (64000, 64000), (256000, 256000)
+    ]
+    assert all("max_output_tokens" not in model for model in models)
+    with mock.patch("byop.core.targets.codex.kc.ensure_key"):
+        target.configure(multi, use_keychain=False, use_env=True, log=lambda _: None)
+    settings = tomllib.loads(target.config_path.read_text())
+    assert "model_context_window" not in settings
+    catalog_path = Path(settings["model_catalog_json"])
+    assert [m["context_window"] for m in json.loads(catalog_path.read_text())["models"]] == [
+        64000, 256000
+    ]
+    with mock.patch("byop.core.targets.codex.kc.ensure_key"):
+        target.configure(single, use_keychain=False, use_env=True, log=lambda _: None)
+    settings = tomllib.loads(target.config_path.read_text())
+    assert settings["model_context_window"] == 64000
+    assert "model_catalog_json" not in settings
 
 def test_codex_build_catalog_has_all_models(tmp_path):
     prov = _provider(models=[

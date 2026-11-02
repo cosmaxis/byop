@@ -12,7 +12,7 @@ import tempfile
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 import tomlkit
@@ -174,9 +174,16 @@ class WarpTarget:
     @staticmethod
     def _manual_values(provider: ProviderConfig) -> str:
         models = ", ".join(model.name for model in provider.models)
-        return (f"Provider name: {provider.provider_name}\nEndpoint URL: {provider.normalized_api_url()}\n"
+        endpoint = urlparse(provider.normalized_api_url())
+        visible = urlunparse(endpoint._replace(
+            query="[REDACTED]" if endpoint.query else "",
+            fragment="[REDACTED]" if endpoint.fragment else "",
+        ))
+        note = "\nCopy the full endpoint URL from your provider settings." if endpoint.query or endpoint.fragment else ""
+        return (f"Provider name: {provider.provider_name}\nEndpoint URL: {visible}{note}\n"
                 f"Protocol: openai_chat_completions\nModels: {models}\n"
-                "API key: [REDACTED — paste your key into Warp; byop never prints it]")
+                "API key: [REDACTED — paste your key into Warp; byop never prints it]\n"
+                "Warp's custom endpoint schema has no context-window or output-token limit fields.")
 
     def configure(self, provider: ProviderConfig, *, dry_run: bool = False,
                   use_keychain: bool = True, use_env: bool = False,
@@ -275,7 +282,8 @@ class WarpTarget:
                 set_endpoint_keys(previous_keys)
             raise
         log(f"Updated Warp settings at {self.settings_path}; API key stored in Warp's Keychain item.")
-        log("Warp sends prompts, context, endpoint URL, and API key through Warp's servers.")
+        log("Warning: Warp's custom endpoint schema has no context-window or output-token limit fields.")
+        log("Warning: Warp sends prompts, context, endpoint URL, and API key through Warp's servers.")
         log(RESTART_NOTICE)
 
     def current_provider_names(self) -> list[str]:

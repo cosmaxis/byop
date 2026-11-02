@@ -94,7 +94,6 @@ def keychain_get(server: str, account: str = "Bearer") -> str | None:
 
 def keychain_set(server: str, api_key: str, account: str = "Bearer") -> None:
     """Store (or replace) the API key in the login keychain."""
-    keychain_delete(server, account)
     cmd = [
         "security",
         "add-internet-password",
@@ -104,6 +103,7 @@ def keychain_set(server: str, api_key: str, account: str = "Bearer") -> None:
         server,
         "-w",
         api_key,
+        "-U",
         LOGIN_KEYCHAIN,
     ]
     res = _run(cmd)

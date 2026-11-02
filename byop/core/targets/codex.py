@@ -159,7 +159,7 @@ class CodexTarget:
                 "refresh_interval_ms": 300000,
             }
         elif use_env:
-            block["env_key"] = provider.env_var_name()
+            block["env_key"] = provider.api_key_env or provider.env_var_name()
         else:
             raise ValueError("Codex requires either keychain storage or an environment variable.")
 
@@ -169,12 +169,14 @@ class CodexTarget:
             "model_provider": provider.provider_name,
             "model_providers": {provider.provider_name: block},
         }
-        if primary.reasoning_effort is not None:
-            fragment["model_reasoning_effort"] = primary.reasoning_effort
         if has_reasoning or len(provider.models) > 1:
             fragment["model_catalog_json"] = str(
                 _catalog_path_for(provider.provider_name, self.catalog_dir)
             )
+        else:
+            fragment["model_context_window"] = primary.max_tokens
+        if primary.reasoning_effort is not None:
+            fragment["model_reasoning_effort"] = primary.reasoning_effort
 
         return fragment
 
@@ -237,6 +239,7 @@ class CodexTarget:
             log(tomlkit.dumps(fragment))
             if "model_catalog_json" in fragment:
                 log("[dry-run] Codex would generate a catalog from its bundled model metadata.")
+            log("[dry-run] Codex's model catalog has no per-model output-token limit field.")
             return
 
         original = self.config_path.read_bytes() if self.config_path.exists() else None
@@ -262,20 +265,23 @@ class CodexTarget:
         block.update(fragment.pop("model_providers")[provider.provider_name])
         if "model_reasoning_effort" not in fragment:
             current.pop("model_reasoning_effort", None)
+        if "model_context_window" not in fragment:
+            current.pop("model_context_window", None)
         previous_catalog = current.get("model_catalog_json")
         if catalog_path is None and isinstance(previous_catalog, str):
             if Path(previous_catalog).parent == self.catalog_dir:
                 current.pop("model_catalog_json", None)
         current.update(fragment)
 
-        kc.ensure_key(
-            server=provider.keychain_server(),
-            api_key=provider.api_key,
-            env_var=provider.env_var_name(),
-            log=log,
-            use_keychain=use_keychain,
-            use_env=use_env,
-        )
+        if use_keychain or not provider.api_key_env:
+            kc.ensure_key(
+                server=provider.keychain_server(),
+                api_key=provider.api_key,
+                env_var=provider.env_var_name(),
+                log=log,
+                use_keychain=use_keychain,
+                use_env=use_env,
+            )
         old_catalog = catalog_path.read_bytes() if catalog_path and catalog_path.exists() else None
         old_mode = catalog_path.stat().st_mode & 0o777 if old_catalog is not None and catalog_path else 0o600
         if catalog_path and catalog is not None:
@@ -293,6 +299,7 @@ class CodexTarget:
                     atomic_write(catalog_path, old_catalog, old_mode)
             raise
         log(f"Updated Codex config at {self.config_path}")
+        log("Warning: Codex's model catalog has no per-model output-token limit field.")
 
     def current_provider_names(self) -> list[str]:
         name = _active_provider(self._load())

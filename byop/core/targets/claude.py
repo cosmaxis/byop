@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -99,6 +100,8 @@ class ClaudeTarget:
             return kc.security_command(server)
         if use_keychain is None and kc.keychain_has(server):
             return kc.security_command(server)
+        if use_keychain is False and provider.api_key_env:
+            return f"printenv {shlex.quote(provider.api_key_env)}"
         return None
 
     def build_fragment(
@@ -191,6 +194,7 @@ class ClaudeTarget:
                 "fragment:"
             )
             log(json.dumps(fragment, indent=2))
+            self._warn_model_limits(provider, log)
             return
 
         target_base_url = anthropic_base_url(provider.normalized_api_url())
@@ -201,7 +205,7 @@ class ClaudeTarget:
                 return
 
         # Store key BEFORE build_fragment so Keychain detection sees fresh entries.
-        if use_keychain or use_env:
+        if use_keychain or (use_env and not provider.api_key_env):
             kc.ensure_key(
                 server=provider.keychain_server(),
                 api_key=provider.api_key,
@@ -234,17 +238,20 @@ class ClaudeTarget:
             }
 
         self._write(merged)
+        self._warn_model_limits(provider, log)
         log(f"Updated Claude Code settings at {self.settings_path}")
         log(
             "Note: Claude Code uses the Anthropic Messages API "
             f"({target_base_url}/v1/messages); ensure your gateway exposes it."
         )
         if "apiKeyHelper" not in fragment:
-            log(
-                "Warning: --no-keychain was set, so ANTHROPIC_AUTH_TOKEN is "
-                "stored in settings.json in plaintext. Prefer removing "
-                "--no-keychain to use apiKeyHelper with the macOS keychain."
-            )
+            log("Warning: Claude Code stores the API key in settings.json as plaintext (--no-keychain).")
+
+    @staticmethod
+    def _warn_model_limits(provider: ProviderConfig, log: Callable[[str], None]) -> None:
+        if len({(model.max_tokens, model.max_output_tokens) for model in provider.models}) > 1:
+            log("Warning: Claude Code's context and output limits are session-wide and use the first model.")
+        log("Warning: Claude Code may cap output or ignore context for recognized model IDs; check /context.")
 
     def current_provider_names(self) -> list[str]:
         name = self._extract_provider_name(self._load())

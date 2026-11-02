@@ -48,6 +48,42 @@ def test_opencode_build_fragment_uses_env_ref_with_keychain():
     assert model["name"] == "Cosmaxis 3"
     assert model["reasoning"] is True
     assert model["interleaved"] == {"field": "reasoning_content"}
+    assert model["limit"] == {"context": 250000, "output": 32000}
+
+
+def test_opencode_keeps_different_limits_per_model():
+    provider = _provider(models=[
+        ModelConfig(name="small", max_tokens=64000, max_output_tokens=4096),
+        ModelConfig(name="large", max_tokens=256000, max_output_tokens=16384),
+    ])
+    models = OpencodeTarget().build_fragment(provider, use_keychain=True)["provider"]["Cosmaxis"]["models"]
+    assert models["small"]["limit"] == {"context": 64000, "output": 4096}
+    assert models["large"]["limit"] == {"context": 256000, "output": 16384}
+
+
+def test_opencode_updates_model_limits_without_losing_unmanaged_metadata(tmp_path):
+    cfg = tmp_path / "opencode.json"
+    cfg.write_text(json.dumps({"provider": {"Cosmaxis": {
+        "options": {"headers": {"X-Team": "keep"}},
+        "models": {
+            "pro": {"cost": {"input": 2, "output": 3}, "temperature": False, "interleaved": {"field": "reasoning_content"}},
+            "removed": {"name": "Removed"},
+        },
+    }}}))
+    provider = _provider(models=[ModelConfig(
+        name="pro", max_tokens=500000, max_output_tokens=16000, reasoning_effort="none",
+        capabilities={"tools": False, "interleaved_reasoning": False},
+    )])
+    OpencodeTarget(cfg).configure(provider, use_keychain=False, use_env=False, log=lambda _: None)
+    block = json.loads(cfg.read_text())["provider"]["Cosmaxis"]
+    assert block["options"]["headers"] == {"X-Team": "keep"}
+    assert set(block["models"]) == {"pro"}
+    model = block["models"]["pro"]
+    assert model["cost"] == {"input": 2, "output": 3}
+    assert model["limit"] == {"context": 500000, "output": 16000}
+    assert model["temperature"] is False
+    assert model["tool_call"] is False
+    assert model["reasoning"] is False and model["interleaved"] is False
 
 
 def test_opencode_falls_back_to_literal_key_only_when_no_keychain_and_no_env():

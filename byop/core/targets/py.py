@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
 
 from .. import keychain as kc
+from .. import settings as sett
 from ..config import ModelConfig, ProviderConfig
 
 AGENT_DIR = Path.home() / ".pi" / "agent"
@@ -39,8 +41,11 @@ class PyTarget:
     name = "py"
     display_name = "py.dev"
 
-    def __init__(self, models_path: Path = MODELS_PATH) -> None:
-        self.models_path = models_path
+    def __init__(self, models_path: Path | None = None) -> None:
+        agent_dir = os.environ.get("PI_CODING_AGENT_DIR")
+        self.models_path = models_path or (
+            Path(agent_dir) / "models.json" if agent_dir else Path.home() / ".pi" / "agent" / "models.json"
+        )
 
     # ------------------------------------------------------------------
     def is_installed(self) -> bool:
@@ -87,6 +92,8 @@ class PyTarget:
             return kc.security_command_ref(server)
         if use_keychain is None and kc.keychain_has(server):
             return kc.security_command_ref(server)
+        if use_keychain is False and provider.api_key_env:
+            return f"${provider.api_key_env}"
         return "[REDACTED]" if redact else provider.api_key
     # ------------------------------------------------------------------
     def _model_entry(self, model: ModelConfig) -> dict:
@@ -96,18 +103,22 @@ class PyTarget:
             "contextWindow": model.max_tokens,
             "maxTokens": model.max_output_tokens,
             "input": ["text", "image"] if model.capabilities.get("images") else ["text"],
+            "reasoning": bool(
+                (model.reasoning_effort and model.reasoning_effort != "none")
+                or model.capabilities.get("interleaved_reasoning")
+            ),
         }
-        if model.reasoning_effort or model.capabilities.get("interleaved_reasoning"):
-            entry["reasoning"] = True
-            if model.reasoning_effort and model.reasoning_effort != "none":
-                entry["thinkingLevelMap"] = {
-                    "minimal": None,
-                    "low": None,
-                    "medium": None,
-                    "high": model.reasoning_effort,
-                    "xhigh": None,
-                    "max": None,
-                }
+        if model.capabilities.get("max_tokens_parameter"):
+            entry["compat"] = {"maxTokensField": "max_tokens"}
+        if model.reasoning_effort and model.reasoning_effort != "none":
+            entry["thinkingLevelMap"] = {
+                "minimal": None,
+                "low": None,
+                "medium": None,
+                "high": model.reasoning_effort,
+                "xhigh": None,
+                "max": None,
+            }
         return entry
 
     def _format_dry_run(self, fragment: dict) -> str:
@@ -128,17 +139,12 @@ class PyTarget:
             ),
             "authHeader": True,
         }
-        any_max_tokens_param = any(
-            m.capabilities.get("max_tokens_parameter") for m in provider.models
-        )
         any_reasoning = any(
             (m.reasoning_effort and m.reasoning_effort != "none")
             or m.capabilities.get("interleaved_reasoning")
             for m in provider.models
         )
         compat: dict = {}
-        if any_max_tokens_param:
-            compat["maxTokensField"] = "max_tokens"
         if any_reasoning:
             compat["supportsReasoningEffort"] = True
         if compat:
@@ -184,13 +190,8 @@ class PyTarget:
             if conflict_action == "skip":
                 log(
                     f"Skip: {self.display_name} already has "
-                    f"{provider.provider_name}; leaving models.json untouched."
+                    f"{provider.provider_name}; leaving {self.models_path.name} untouched."
                 )
-                # Note: unlike ZedTarget, PyTarget 'skip' short-circuits on
-                # provider-name match alone (models.json has no api_url next
-                # to the entry name). The keychain is re-ensured at the
-                # general path below regardless, so a missing/wrong secret
-                # is fixed even on a "skip" run.
                 return
             if conflict_action == "append":
                 i = 2
@@ -217,7 +218,7 @@ class PyTarget:
         # secure ``!command`` (launch-independent) instead of embedding it.
         # Only skipped when the user explicitly passes --no-keychain, in which
         # case the key is embedded in plaintext (see warning below).
-        if use_keychain or use_env:
+        if use_keychain or (use_env and not provider.api_key_env):
             kc.ensure_key(
                 server=provider.keychain_server(),
                 api_key=provider.api_key,
@@ -234,17 +235,48 @@ class PyTarget:
         self.models_path.parent.mkdir(parents=True, exist_ok=True)
         current = self._load()
         providers = current.setdefault("providers", {})
-        providers[name_to_write] = fragment["providers"][provider.provider_name]
+        incoming = fragment["providers"][provider.provider_name]
+        previous = providers.get(name_to_write)
+        if isinstance(previous, dict):
+            previous = dict(previous)
+            old_models = {
+                m.get("id"): m for m in (previous.pop("models", []) or [])
+                if isinstance(m, dict)
+            }
+            compat = previous.get("compat")
+            if isinstance(compat, dict):
+                remaining_compat = {
+                    k: v for k, v in compat.items()
+                    if k not in {"maxTokensField", "supportsReasoningEffort"}
+                }
+                if remaining_compat:
+                    previous["compat"] = remaining_compat
+                else:
+                    previous.pop("compat")
+            merged = sett.merge(previous, incoming)
+            merged["models"] = []
+            for model in incoming["models"]:
+                old_model = dict(old_models.get(model["id"], {}))
+                old_model.pop("thinkingLevelMap", None)
+                old_compat = old_model.get("compat")
+                if isinstance(old_compat, dict):
+                    remaining = {k: v for k, v in old_compat.items() if k != "maxTokensField"}
+                    if remaining:
+                        old_model["compat"] = remaining
+                    else:
+                        old_model.pop("compat")
+                merged["models"].append(sett.merge(old_model, model))
+            providers[name_to_write] = merged
+        else:
+            providers[name_to_write] = incoming
         self._write(current)
         log(f"Updated {self.display_name} models at {self.models_path}")
         if fragment["providers"][provider.provider_name]["apiKey"].startswith("!"):
             log("API key is read from the macOS keychain at runtime (secure).")
+        elif provider.api_key_env and not use_keychain:
+            log(f"API key is read from {provider.api_key_env} at runtime.")
         else:
-            log(
-                "Warning: --no-keychain was set, so the API key is embedded in "
-                "models.json in plaintext. Prefer removing --no-keychain so the "
-                "key is read from the macOS keychain instead."
-            )
+            log(f"Warning: API key stored in {self.models_path.name} as plaintext (--no-keychain).")
 
     # ------------------------------------------------------------------
     def _load(self) -> dict:

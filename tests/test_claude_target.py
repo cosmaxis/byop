@@ -97,6 +97,7 @@ def test_custom_gateway_model_limits_refresh_without_replacing_role_mappings(tmp
         "permissions": {"allow": ["Read"]},
     }))
     target = ClaudeTarget(settings_path=settings)
+    notices: list[str] = []
     for name, label, context, output in [
         ("pro", "Gateway Pro", 128000, 16000),
         ("other-route", None, 256000, 32000),
@@ -105,7 +106,7 @@ def test_custom_gateway_model_limits_refresh_without_replacing_role_mappings(tmp
             ModelConfig(name=name, display_name=label,
                         max_tokens=context, max_output_tokens=output),
             ModelConfig(name="not-selected", max_tokens=1000000),
-        ]), use_keychain=False, log=lambda _: None)
+        ]), use_keychain=False, log=notices.append)
         data = json.loads(settings.read_text())
         assert data["model"] == name
         assert data["env"]["ANTHROPIC_CUSTOM_MODEL_OPTION"] == name
@@ -114,6 +115,7 @@ def test_custom_gateway_model_limits_refresh_without_replacing_role_mappings(tmp
         assert data["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == str(output)
         assert data["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "existing-sonnet"
         assert data["permissions"] == {"allow": ["Read"]}
+    assert any("session-wide" in message and "first model" in message for message in notices)
 
 
 @pytest.mark.parametrize("mode,classifier,expected_mode,expected_classifier", [
@@ -214,13 +216,17 @@ def test_configure_dry_run_never_leaks_secret_or_touches_keychain(tmp_path):
     with mock.patch("byop.core.targets.claude.kc.keychain_has") as khas, \
          mock.patch("byop.core.targets.claude.kc.ensure_key") as ek:
         target.configure(_provider(), dry_run=True, use_keychain=False, log=logs.append)
-        target.configure(_provider(), dry_run=True, use_keychain=True, log=logs.append)
+        target.configure(_provider(models=[
+            ModelConfig(name="small", max_tokens=64000, max_output_tokens=4096),
+            ModelConfig(name="large", max_tokens=256000, max_output_tokens=16384),
+        ]), dry_run=True, use_keychain=True, log=logs.append)
     assert not settings.exists()
     khas.assert_not_called()
     ek.assert_not_called()
     joined = "\n".join(logs)
     assert "sk-12345678" not in joined
     assert "[REDACTED]" in joined
+    assert "session-wide" in joined
 
 
 @pytest.mark.parametrize("existing_url", ["https://api.example.com", "https://old.example.com"])

@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from byop.core.config import ModelConfig, ProviderConfig
@@ -52,6 +54,17 @@ def test_zed_build_fragment():
     assert frag["agent"]["inline_assistant_model"]["model"] == "hy3"
 
 
+def test_zed_keeps_distinct_context_and_output_limits():
+    provider = _provider(models=[
+        ModelConfig(name="small", max_tokens=64000, max_output_tokens=4096),
+        ModelConfig(name="large", max_tokens=256000, max_output_tokens=16384),
+    ])
+    models = ZedTarget().build_fragment(provider)["language_models"]["openai_compatible"]["ExampleProvider"]["available_models"]
+    assert [(m["max_tokens"], m["max_output_tokens"]) for m in models] == [
+        (64000, 4096), (256000, 16384)
+    ]
+
+
 def test_zed_configure_writes_and_merges(tmp_path):
     settings = tmp_path / "settings.json"
     sett = __import__("byop.core.settings", fromlist=["settings"])
@@ -59,13 +72,26 @@ def test_zed_configure_writes_and_merges(tmp_path):
     target = ZedTarget(settings_path=settings)
     with mock.patch.object(target, "install"), \
          mock.patch("byop.core.targets.zed.kc.ensure_key",
-                    return_value=["k:x"]) as ek:
+                    return_value=["k:x"]):
         target.configure(_provider(), log=lambda m: None)
     data = sett.load_path(settings)
     assert data["vim_mode"] is True
     assert "ExampleProvider" in data["language_models"]["openai_compatible"]
-    ek.assert_called_once()
-    assert ek.call_args.kwargs["server"] == "https://api.example.com/v1"
+
+
+def test_zed_refuses_to_replace_existing_shell_export(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    shell = tmp_path / ".zshrc"
+    shell.write_text("# keep\nexport EXAMPLEPROVIDER_API_KEY=existing-value\n")
+    settings = tmp_path / "settings.json"
+    settings.write_text('{"vim_mode": true}\n')
+    original_shell, original_settings = shell.read_bytes(), settings.read_bytes()
+    with pytest.raises(ValueError, match="already exports"):
+        ZedTarget(settings).configure(
+            _provider(api_key_env="CUSTOM_SECRET"), use_keychain=False, use_env=True, log=lambda _: None
+        )
+    assert shell.read_bytes() == original_shell
+    assert settings.read_bytes() == original_settings
 
 
 def test_zed_skip_when_same_provider_and_url(tmp_path):
@@ -143,13 +169,19 @@ def test_py_is_installed_via_cli():
         assert PyTarget().is_installed() is False
 
 
+def test_pi_uses_explicit_agent_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "agent"))
+    assert PyTarget().models_path == tmp_path / "agent" / "models.json"
+    assert PyTarget(tmp_path / "custom.json").models_path == tmp_path / "custom.json"
+
+
 def test_py_build_fragment_shape():
     provider = _provider(models=[
         ModelConfig(name="hy3", max_tokens=250000, max_output_tokens=32000,
                     reasoning_effort="medium",
                     capabilities={"max_tokens_parameter": True})
     ])
-    frag = PyTarget().build_fragment(provider)
+    frag = PyTarget().build_fragment(provider, use_keychain=False)
     prov = frag["providers"]["ExampleProvider"]
     assert prov["baseUrl"] == "https://api.example.com/v1"
     assert prov["api"] == "openai-completions"
@@ -159,7 +191,18 @@ def test_py_build_fragment_shape():
     assert model["reasoning"] is True
     # reasoning_effort 'medium' maps to high in thinkingLevelMap
     assert prov["compat"]["supportsReasoningEffort"] is True
-    assert prov["compat"]["maxTokensField"] == "max_tokens"
+
+
+def test_pi_keeps_distinct_context_and_output_limits():
+    provider = _provider(models=[
+        ModelConfig(name="small", max_tokens=64000, max_output_tokens=4096),
+        ModelConfig(name="large", max_tokens=256000, max_output_tokens=16384),
+    ])
+    with mock.patch("byop.core.targets.py.kc.keychain_has", return_value=True):
+        models = PyTarget().build_fragment(provider)["providers"]["ExampleProvider"]["models"]
+    assert [(m["contextWindow"], m["maxTokens"]) for m in models] == [
+        (64000, 4096), (256000, 16384)
+    ]
 
 
 def test_py_api_key_ref_uses_keychain_command_when_present():
@@ -209,6 +252,32 @@ def test_py_configure_merges_existing_providers(tmp_path):
     data = json.loads(models.read_text())
     assert "ExampleProvider" in data["providers"]
     assert "Other" in data["providers"]
+
+def test_pi_preserves_unmanaged_fields_and_disables_reasoning_on_update(tmp_path):
+    path = tmp_path / "models.json"
+    path.write_text(json.dumps({"providers": {"ExampleProvider": {
+        "headers": {"X-Team": "keep"},
+        "compat": {"custom": True, "maxTokensField": "max_tokens", "supportsReasoningEffort": True},
+        "models": [
+            {"id": "hy3", "cost": {"input": 2}, "reasoning": True, "thinkingLevelMap": {"high": "high"}},
+            {"id": "removed"},
+        ],
+    }}}))
+    target = PyTarget(path)
+    with mock.patch("byop.core.targets.py.kc.ensure_key"), \
+         mock.patch("byop.core.targets.py.kc.keychain_has", return_value=True):
+        target.configure(_provider(models=[
+            ModelConfig(name="hy3", max_tokens=240000, max_output_tokens=16000, reasoning_effort="none")
+        ]), log=lambda _: None)
+    block = json.loads(path.read_text())["providers"]["ExampleProvider"]
+    assert block["headers"] == {"X-Team": "keep"}
+    assert block["compat"] == {"custom": True}
+    assert len(block["models"]) == 1
+    model = block["models"][0]
+    assert model["cost"] == {"input": 2}
+    assert (model["contextWindow"], model["maxTokens"]) == (240000, 16000)
+    assert model["reasoning"] is False and "thinkingLevelMap" not in model
+
 
 
 def test_py_dry_run_does_not_write_or_leak_secret(tmp_path):

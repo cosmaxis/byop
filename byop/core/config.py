@@ -79,6 +79,7 @@ class ProviderConfig:
     set_commit_message: bool = False
     set_thread_summary: bool = False
     use_edit_predictions: bool = False
+    api_key_env: str | None = None
 
     # ------------------------------------------------------------------
     # Validation
@@ -108,6 +109,9 @@ class ProviderConfig:
             errors.append("API key must not be empty.")
         elif len(self.api_key) < 8:
             errors.append("API key looks too short to be valid.")
+
+        if self.api_key_env is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.api_key_env):
+            errors.append("API key environment variable name is invalid.")
 
         if not self.models:
             errors.append("At least one model must be configured.")

@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import replace
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
@@ -49,9 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- status (default) ------------------------------------------------
     status_p = sub.add_parser(
         "status",
-        help="Show the current profile + per-target state (read-only).",
-        description="Read-only dashboard. Same as running `byop` with no "
-        "subcommand. Does not modify any files.",
+        help="Show the active provider and tool status.",
+        description="Read-only provider and target status. Does not modify any files.",
     )
     _add_omp_path_args(status_p)
 
@@ -59,9 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     apply_p = sub.add_parser(
         "apply",
         help="Sync the active profile to one or more targets.",
-        description="Apply the active profile to selected targets. The wizard "
-        "is shown when no profile exists yet, or when --provider/--api-url/"
-        "--api-key/--model are not provided.",
+        description="Apply the active profile to selected targets. If no profile exists, "
+        "the interactive setup collects provider details.",
     )
     _add_apply_args(apply_p)
 
@@ -111,12 +110,12 @@ def _add_omp_path_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--profile",
         dest="omp_profile",
-        help="OMP profile name (writes ~/.omp/profiles/NAME/agent/models.yml).",
+        help="OMP profile name (default: active OMP_PROFILE/PI_PROFILE).",
     )
     p.add_argument(
         "--omp-models-path",
         type=Path,
-        help="Explicit OMP models.yml path (overrides --profile).",
+        help="Explicit OMP model file path (overrides profile selection).",
     )
 
 
@@ -158,12 +157,12 @@ def _add_apply_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--profile",
         dest="omp_profile",
-        help="OMP profile name (writes ~/.omp/profiles/NAME/agent/models.yml).",
+        help="OMP profile name (default: active OMP_PROFILE/PI_PROFILE).",
     )
     p.add_argument(
         "--omp-models-path",
         type=Path,
-        help="Explicit OMP models.yml path (overrides --profile).",
+        help="Explicit OMP model file path (overrides profile selection).",
     )
     p.add_argument(
         "--claude-permission-mode",
@@ -404,7 +403,7 @@ def _run_default_landing() -> int:
                 api_key,
                 {
                     "use_keychain": profile.api_key_ref == "keychain",
-                    "use_env": profile.api_key_ref.startswith("env:"),
+                    "use_env": profile.export_env or profile.api_key_ref.startswith("env:"),
                 },
             )
             _run_apply(args, interactive_session=True)
@@ -428,10 +427,14 @@ def _run_first_run_wizard() -> int:
 
     use_keychain = prefs["use_keychain"]
     use_env = prefs["use_env"] or not use_keychain
+    if use_keychain and _shared_keychain_conflict(provider.keychain_server(), api_key, profile_name):
+        prompt.error("Another provider uses this Keychain URL with a different key. Use shell environment storage or a different endpoint.")
+        return 2
     profile = prof.profile_from_provider(
         provider, name=profile_name,
         api_key_ref="keychain" if use_keychain else f"env:{provider.env_var_name()}",
     )
+    profile.export_env = use_keychain and use_env
     kc.ensure_key(
         provider.keychain_server(), api_key, provider.env_var_name(),
         use_keychain=use_keychain, use_env=use_env, log=lambda _: None,
@@ -503,6 +506,19 @@ def _profile_for_provider(provider_name: str) -> str | None:
             return name
     return None
 
+def _shared_keychain_conflict(server: str, api_key: str, exclude: str) -> bool:
+    from .core import keychain as kc
+    from .core import profiles as prof
+
+    for name in prof.list_profiles():
+        if name == exclude:
+            continue
+        other = prof.load_profile(name)
+        if other.api_key_ref == "keychain" and other.api_url.rstrip("/") == server:
+            return kc.keychain_get(server) != api_key
+    return False
+
+
 # ===========================================================================
 # status / apply / profile / doctor / export-config
 # ===========================================================================
@@ -529,13 +545,20 @@ def _run_status(
     prompt.kv("Provider", profile.provider_name)
     prompt.kv("Endpoint", profile.api_url)
     auth = (
-        "macOS Keychain"
+        ("macOS Keychain + shell env (plaintext)" if profile.export_env else "macOS Keychain")
         if profile.api_key_ref == "keychain"
         else (profile.env_var or profile.api_key_ref)
     )
     prompt.kv("Auth", auth)
-    model_names = [m.name for m in profile.models]
-    prompt.kv("Models", ", ".join(model_names) if model_names else "none")
+    if not profile.models:
+        prompt.kv("Models", "none")
+    for index, model in enumerate(profile.models):
+        label = f"{model.name} ({model.display_name})" if model.display_name and model.display_name != model.name else model.name
+        default = " · default" if index == 0 else ""
+        prompt.kv("Model" if index == 0 else "", (
+            f"{label}{default} · context {model.max_tokens} · output {model.max_output_tokens}"
+            f" · reasoning {model.reasoning_effort or 'off'}"
+        ))
     prompt.spacer()
 
     unconfigured = 0
@@ -613,22 +636,20 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
             api_key = provider.api_key
             non_interactive = True
         else:
-            # Interactive path. Prefer loading the active profile to pre-fill
-            # so the user doesn't re-enter provider/api_url/models.
             from .core import profiles as prof
 
-            prefill: ProviderConfig | None = None
             if prof.profile_exists(prof.get_active_profile_name()):
                 saved = prof.load_profile()
-                prefill = saved.to_provider_config(
-                    api_key=_load_profile_api_key(saved)
-                )
-
-            collected, prefs = wizard.run_wizard(prefill=prefill)
-            provider = collected
+                provider = saved.to_provider_config(api_key=_load_profile_api_key(saved))
+                args._provider_config = provider
+                use_keychain = saved.api_key_ref == "keychain" and not args.no_keychain
+                use_env = saved.export_env or saved.api_key_ref.startswith("env:") or args.env_key
+                non_interactive = not sys.stdin.isatty()
+            else:
+                provider, prefs = wizard.run_wizard()
+                use_keychain = prefs["use_keychain"] and not args.no_keychain
+                use_env = prefs["use_env"] or args.env_key
             api_key = provider.api_key
-            use_keychain = prefs["use_keychain"] and not args.no_keychain
-            use_env = prefs["use_env"] or args.env_key
     if interactive_session:
         non_interactive = False
     if not use_keychain and not use_env:
@@ -651,6 +672,9 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
             return 2
         if not non_interactive and profile_name != active_name and prof.profile_exists(profile_name):
             prompt.error(f"Provider {profile_name!r} already exists. Switch to it or choose another name.")
+            return 2
+        if use_keychain and _shared_keychain_conflict(provider.keychain_server(), api_key, profile_name):
+            prompt.error("Another provider uses this Keychain URL with a different key. Use shell environment storage or a different endpoint.")
             return 2
     # ---- Select targets --------------------------------------------------
     targets = _select_targets(
@@ -739,6 +763,16 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
                     provider, name=profile_name,
                     api_key_ref="keychain" if use_keychain else f"env:{provider.env_var_name()}",
                 )
+                profile.export_env = use_keychain and use_env
+                if (
+                    getattr(args, "_provider_config", None) is not None
+                    and destination is not None
+                    and destination.provider_name == provider.provider_name
+                    and (destination.api_key_ref == "keychain") == use_keychain
+                ):
+                    profile.api_key_ref = destination.api_key_ref
+                    profile.env_var = destination.env_var
+                    profile.created_at = destination.created_at
                 prof.save_profile(
                     profile, allow_overwrite=prof.profile_exists(profile_name), api_key=api_key
                 )
@@ -770,6 +804,9 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
                 )
                 if any(line.startswith("Skip:") for line in cfg_logs):
                     prompt.step(target.display_name, "unchanged", status="skip")
+                    for line in cfg_logs:
+                        if line.startswith("Warning:"):
+                            prompt.warn(line.removeprefix("Warning:").strip())
                 elif any("manual setup required" in line.lower() for line in cfg_logs):
                     prompt.step(target.display_name, "manual setup required", status="warn")
                     for line in cfg_logs:
@@ -782,6 +819,9 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
                     if cfg_path:
                         parts.append(cfg_path)
                     prompt.step(target.display_name, " · ".join(parts) or "configured", status="ok")
+                    for line in cfg_logs:
+                        if line.startswith("Warning:"):
+                            prompt.warn(line.removeprefix("Warning:").strip())
                     configured_count += 1
                     if target.name == "warp":
                         configured_warp = True
@@ -901,10 +941,14 @@ def _profile_new_interactive(*, activate: bool = False) -> int:
 
     use_keychain = prefs["use_keychain"]
     use_env = prefs["use_env"] or not use_keychain
+    if use_keychain and _shared_keychain_conflict(collected.keychain_server(), collected.api_key, name):
+        prompt.error("Another provider uses this Keychain URL with a different key. Use shell environment storage or a different endpoint.")
+        return 2
     profile = prof.profile_from_provider(
         collected, name=name,
         api_key_ref="keychain" if use_keychain else f"env:{collected.env_var_name()}",
     )
+    profile.export_env = use_keychain and use_env
     kc.ensure_key(
         collected.keychain_server(), collected.api_key, collected.env_var_name(),
         use_keychain=use_keychain, use_env=use_env, log=lambda _: None,
@@ -921,7 +965,7 @@ def _profile_new_interactive(*, activate: bool = False) -> int:
 
 
 def _profile_edit_interactive() -> int:
-    """Re-run the wizard pre-filled with the active profile."""
+    """Edit the active provider without reading or rewriting its secret for metadata edits."""
     from .core import profiles as prof
 
     name = prof.get_active_profile_name()
@@ -929,10 +973,21 @@ def _profile_edit_interactive() -> int:
         prompt.error("No active profile to edit. Run `byop profile new`.")
         return 2
     saved = prof.load_profile(name)
-    collected, prefs = wizard.run_wizard(
-        prefill=saved.to_provider_config(api_key=_load_profile_api_key(saved))
-    )
-    errors = collected.validate()
+    if saved.api_key_ref == "keychain":
+        previous_storage = (
+            "Keychain + shell env (plaintext)" if saved.export_env else "macOS Keychain"
+        )
+    else:
+        previous_storage = "Shell env only (plaintext)"
+    result = wizard.edit_provider(saved.to_provider_config(), storage=previous_storage)
+    if result is None:
+        return 0
+    collected, storage = result
+    if storage == previous_storage and collected == saved.to_provider_config():
+        prompt.success("Nothing changed")
+        return 0
+    # Validation requires a key; unchanged credentials remain referenced, never fetched.
+    errors = replace(collected, api_key=collected.api_key or "stored-key").validate()
     if errors:
         prompt.error("Invalid provider configuration: " + "; ".join(errors))
         return 2
@@ -940,25 +995,68 @@ def _profile_edit_interactive() -> int:
     if new_name != name and (prof.profile_exists(new_name) or _profile_for_provider(new_name)):
         prompt.error(f"Provider {new_name!r} already exists. Choose a different name.")
         return 2
+
+    use_keychain = storage != "Shell env only (plaintext)"
+    use_env = storage != "macOS Keychain"
+    old_keychain = saved.api_key_ref == "keychain"
+    new_server = collected.keychain_server()
+    old_server = saved.api_url.rstrip("/")
+    old_env = saved.env_var or saved.api_key_ref.removeprefix("env:")
+    new_env = (
+        old_env if saved.api_key_ref.startswith("env:") and not use_keychain
+        else collected.env_var_name()
+    )
+    was_env = saved.api_key_ref.startswith("env:") or saved.export_env
+    write_keychain = use_keychain and (bool(collected.api_key) or not old_keychain or new_server != old_server)
+    write_env = use_env and (
+        bool(collected.api_key) or not was_env or new_env != old_env or old_keychain != use_keychain
+    )
+    needs_key = bool(collected.api_key) or write_keychain or write_env
+    key = collected.api_key
+    if needs_key and not key:
+        key = _load_profile_api_key(saved)
+    if needs_key and not key:
+        prompt.error("Stored API key is unavailable. Enter a new API key before changing storage or its reference.")
+        return 2
+
+    if write_keychain:
+        for other_name in prof.list_profiles():
+            if other_name == name:
+                continue
+            other = prof.load_profile(other_name)
+            if other.api_key_ref == "keychain" and other.api_url.rstrip("/") == new_server:
+                prompt.error("Another saved provider uses this Keychain URL; changing its key would affect that provider.")
+                return 2
+
     from .core import keychain as kc
 
-    use_keychain = prefs["use_keychain"]
-    use_env = prefs["use_env"] or not use_keychain
-    profile = prof.profile_from_provider(
-        collected, name=new_name,
-        api_key_ref="keychain" if use_keychain else f"env:{collected.env_var_name()}",
-    )
-    kc.ensure_key(
-        collected.keychain_server(), collected.api_key, collected.env_var_name(),
-        use_keychain=use_keychain, use_env=use_env, log=lambda _: None,
-    )
-    if not use_keychain:
-        os.environ[collected.env_var_name()] = collected.api_key
-    prof.save_profile(profile, allow_overwrite=new_name == name, api_key=collected.api_key)
+    # Keep the original reference for metadata-only edits, including custom env names.
+    ref = "keychain" if use_keychain else f"env:{new_env}"
+    updated = prof.profile_from_provider(collected, name=new_name, api_key_ref=ref)
+    updated.export_env = use_keychain and use_env
+    updated.env_var = new_env if (use_env or saved.api_key_ref.startswith("env:")) else saved.env_var
+    updated.created_at = saved.created_at
+    if write_env:
+        try:
+            kc.env_var_export_line(new_env, key)
+        except ValueError as exc:
+            prompt.error(str(exc))
+            return 2
+    if write_keychain:
+        kc.keychain_set(new_server, key)
+    if write_env:
+        kc.write_env_to_profile(new_env, key)
+        os.environ[new_env] = key
+        prompt.warn("Shell profile updated · run `source ~/.zshrc` or open a new terminal")
+    prof.save_profile(updated, allow_overwrite=new_name == name)
     if new_name != name:
         prof.set_active_profile_name(new_name)
         prof.delete_profile(name)
     prompt.success(f"Updated provider · {new_name}")
+    if old_keychain and not use_keychain:
+        prompt.warn("Previous Keychain entry remains; remove it manually if unused by other providers.")
+    if was_env and (not use_env or new_env != old_env):
+        prompt.warn("Previous shell export remains; remove it manually if unused by other providers.")
     return 0
 
 
@@ -1055,11 +1153,13 @@ class _ConflictRejected(Exception):
 
 def _build_model(name: str, display: str | None, reasoning: str | None,
                  max_tokens: int, max_out: int, images: bool,
-                 interleaved: bool, max_param: bool) -> ModelConfig:
+                 interleaved: bool, max_param: bool,
+                 capabilities: dict[str, bool] | None = None) -> ModelConfig:
     caps = default_model_capabilities()
     caps["images"] = images
     caps["interleaved_reasoning"] = interleaved
     caps["max_tokens_parameter"] = max_param
+    caps.update(capabilities or {})
     return ModelConfig(
         name=name,
         display_name=display,
@@ -1089,7 +1189,7 @@ def parse_model_specs(specs: list[str]) -> list[dict]:
     Returns a list of dicts with the model fields consumed by _provider_from_args.
     Raises ValueError on unknown keys or invalid reasoning_effort values.
     """
-    from .core.config import DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TOKENS, KNOWN_REASONING_EFFORTS
+    from .core.config import KNOWN_REASONING_EFFORTS
 
     out: list[dict] = []
     for spec in specs:
@@ -1099,16 +1199,7 @@ def parse_model_specs(specs: list[str]) -> list[dict]:
         name = parts[0].strip()
         if not name:
             raise ValueError(f"Empty model name in --model {spec!r}.")
-        entry = {
-            "name": name,
-            "images": False,
-            "interleaved_reasoning": False,
-            "max_tokens_parameter": False,
-            "max_tokens": DEFAULT_MAX_TOKENS,
-            "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
-            "reasoning_effort": None,
-            "display_name": None,
-        }
+        entry: dict = {"name": name}
         for part in parts[1:]:
             if not part:
                 raise ValueError(f"Empty segment in --model {spec!r}.")
@@ -1127,7 +1218,7 @@ def parse_model_specs(specs: list[str]) -> list[dict]:
                         )
                 elif k in _MODEL_SPEC_INT_KEYS:
                     try:
-                        entry[k] = int(v)
+                        entry["max_tokens" if k in {"context_window", "contextWindow"} else k] = int(v)
                     except ValueError as exc:
                         raise ValueError(
                             f"--model {spec!r}: {k} expects integer, got {v!r}."
@@ -1157,7 +1248,6 @@ def parse_model_specs(specs: list[str]) -> list[dict]:
                         f"Bare keys must be boolean flags."
                     )
                 entry[key] = True
-        # Mirror display_name -> display kwarg expected by _build_model.
         out.append(entry)
     return out
 
@@ -1168,13 +1258,14 @@ def _provider_from_args(args: argparse.Namespace) -> ProviderConfig:
     for s in specs:
         models.append(_build_model(
             name=s["name"],
-            display=s.get("display_name") or args.model_display,
-            reasoning=s.get("reasoning_effort") or args.reasoning_effort,
+            display=s.get("display_name", args.model_display),
+            reasoning=s.get("reasoning_effort", args.reasoning_effort),
             max_tokens=s.get("max_tokens", args.max_tokens),
             max_out=s.get("max_output_tokens", args.max_output_tokens),
             images=s.get("images", args.images),
             interleaved=s.get("interleaved_reasoning", args.interleaved_reasoning),
             max_param=s.get("max_tokens_parameter", args.max_tokens_parameter),
+            capabilities={key: s[key] for key in _MODEL_SPEC_BOOL_KEYS if key in s},
         ))
     if not models and args.model_name:
         models.append(_build_model(

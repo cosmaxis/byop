@@ -101,8 +101,7 @@ def test_parse_provider_paste_accepts_id_alias_for_models():
     assert missing == []
 
 
-def test_parse_provider_paste_name_wins_over_id():
-    """When both ``name`` and ``id`` are present, ``name`` is preferred (it's the source of truth)."""
+def test_parse_provider_paste_preserves_native_model_id_and_display_name():
     text = json.dumps({
         "provider_name": "P",
         "api_url": "https://api.example.com/v1",
@@ -110,7 +109,7 @@ def test_parse_provider_paste_name_wins_over_id():
         "models": [{"id": "m1", "name": "M1"}],
     })
     cfg, _missing = parse_provider_paste(text)
-    assert cfg.models[0].name == "M1"
+    assert (cfg.models[0].name, cfg.models[0].display_name) == ("m1", "M1")
 
 
 def test_parse_provider_paste_accepts_context_window_alias():
@@ -123,6 +122,52 @@ def test_parse_provider_paste_accepts_context_window_alias():
     cfg, missing = parse_provider_paste(text)
     assert cfg.models[0].max_tokens == 200000
     assert missing == []
+
+
+def test_pasted_models_preserve_native_and_profile_token_limits():
+    text = json.dumps({
+        "provider_name": "P", "api_url": "https://api.example.com/v1", "api_key": "sk-12345678",
+        "models": [
+            {"name": "pro", "contextWindow": 700000, "maxTokens": 64000, "input": ["text", "image"]},
+            {"id": "lite", "context_window": 240000, "max_tokens": 16000},
+        ],
+    })
+    cfg, missing = parse_provider_paste(text)
+    assert missing == []
+    assert [(m.name, m.max_tokens, m.max_output_tokens) for m in cfg.models] == [
+        ("pro", 700000, 64000), ("lite", 240000, 16000),
+    ]
+    assert cfg.models[0].capabilities["images"] is True
+
+
+def test_pasted_keyed_models_preserve_ids_names_and_limits():
+    text = json.dumps({
+        "provider_name": "P", "baseUrl": "https://api.example.com/v1", "api_key": "sk-12345678",
+        "models": {
+            "pro": {"name": "Professional", "limit": {"context": 500000, "output": 64000}, "attachment": True},
+            "lite": {"name": "Lite", "limit": {"context": 128000, "output": 16000}, "tool_call": False},
+        },
+    })
+    cfg, missing = parse_provider_paste(text)
+    assert missing == []
+    assert cfg.api_url == "https://api.example.com/v1"
+    assert [(m.name, m.display_name, m.max_tokens, m.max_output_tokens) for m in cfg.models] == [
+        ("pro", "Professional", 500000, 64000), ("lite", "Lite", 128000, 16000),
+    ]
+    assert cfg.models[0].capabilities["images"] is True
+    assert cfg.models[1].capabilities["tools"] is False
+
+
+def test_pasted_invalid_limit_does_not_echo_its_value():
+    import pytest
+
+    data = {
+        "provider_name": "P", "api_url": "https://api.example.com/v1", "api_key": "sk-12345678",
+        "models": [{"name": "pro", "contextWindow": "sensitive-invalid-value"}],
+    }
+    with pytest.raises(ValueError, match="limits must be integers") as error:
+        parse_provider_paste(json.dumps(data))
+    assert "sensitive-invalid-value" not in str(error.value)
 
 
 def test_parse_provider_paste_rejects_garbage():
@@ -149,17 +194,20 @@ def test_parse_provider_paste_rejects_model_missing_name():
         parse_provider_paste(text)
 
 
-def test_parse_provider_paste_silently_drops_non_dict_model_entries():
-    """A string or number in the models list is skipped (no crash)."""
-    text = json.dumps({
-        "provider_name": "P",
-        "api_url": "https://api.example.com/v1",
-        "api_key": "sk-12345678",
-        "models": ["ignored", 123, {"name": "kept"}],
-    })
-    cfg, missing = parse_provider_paste(text)
+def test_pasted_models_accept_ids_without_silently_dropping_entries():
+    import pytest
+
+    data = {
+        "provider_name": "P", "api_url": "https://api.example.com/v1", "api_key": "sk-12345678",
+        "models": ["lite", {"name": "pro", "contextWindow": 200000}],
+    }
+    cfg, missing = parse_provider_paste(json.dumps(data))
     assert missing == []
-    assert [m.name for m in cfg.models] == ["kept"]
+    assert [m.name for m in cfg.models] == ["lite", "pro"]
+    assert cfg.models[1].max_tokens == 200000
+    data["models"].append(123)
+    with pytest.raises(ValueError, match="Each model"):
+        parse_provider_paste(json.dumps(data))
 
 
 def test_parse_provider_paste_non_dict_capabilities_become_empty():

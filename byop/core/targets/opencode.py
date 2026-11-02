@@ -74,7 +74,8 @@ class OpencodeTarget:
         active; fall back to literal key (or ``[REDACTED]`` in dry-run) only
         when neither is available.
         """
-        env_ref = f"{{env:{provider.env_var_name()}}}"
+        env_name = provider.api_key_env if use_env and not use_keychain else None
+        env_ref = f"{{env:{env_name or provider.env_var_name()}}}"
         if use_keychain is True or use_env:
             return env_ref
         if use_keychain is None and kc.keychain_has(provider.keychain_server()):
@@ -84,14 +85,21 @@ class OpencodeTarget:
     def _model_entry(self, model: ModelConfig) -> dict:
         entry: dict = {
             "name": model.display_name or model.name,
-            "tool_call": True,
+            "limit": {
+                "context": model.max_tokens,
+                "output": model.max_output_tokens,
+            },
+            "tool_call": model.capabilities.get("tools", True),
             "temperature": True,
             "attachment": model.capabilities.get("images", False),
         }
-        if model.reasoning_effort and model.reasoning_effort != "none":
-            entry["reasoning"] = True
-        if model.capabilities.get("interleaved_reasoning"):
-            entry["interleaved"] = {"field": "reasoning_content"}
+        entry["reasoning"] = bool(
+            (model.reasoning_effort and model.reasoning_effort != "none")
+            or model.capabilities.get("interleaved_reasoning")
+        )
+        entry["interleaved"] = (
+            {"field": "reasoning_content"} if model.capabilities.get("interleaved_reasoning") else False
+        )
         return entry
 
     def build_fragment(
@@ -158,7 +166,7 @@ class OpencodeTarget:
                     f"Skip: OpenCode already has {provider.provider_name}; "
                     f"leaving {self.config_path} untouched."
                 )
-                if use_keychain or use_env:
+                if use_keychain or (use_env and not provider.api_key_env):
                     kc.ensure_key(
                         server=provider.keychain_server(),
                         api_key=provider.api_key,
@@ -179,7 +187,7 @@ class OpencodeTarget:
                     f"writing under {name_to_write}."
                 )
 
-        if use_keychain or use_env:
+        if use_keychain or (use_env and not provider.api_key_env):
             kc.ensure_key(
                 server=provider.keychain_server(),
                 api_key=provider.api_key,
@@ -200,7 +208,28 @@ class OpencodeTarget:
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         current = self._load()
         providers = current.setdefault("provider", {})
-        providers[name_to_write] = new_block
+        previous = providers.get(name_to_write)
+        if isinstance(previous, dict):
+            previous_models = previous.get("models")
+            if not isinstance(previous_models, dict):
+                previous_models = {}
+            merged = sett.merge(previous, new_block)
+            merged["models"] = {
+                model_id: sett.merge(
+                    previous_models.get(model_id, {})
+                    if isinstance(previous_models.get(model_id), dict) else {},
+                    {
+                        key: value for key, value in model.items()
+                        if key != "temperature"
+                        or not isinstance(previous_models.get(model_id), dict)
+                        or key not in previous_models[model_id]
+                    },
+                )
+                for model_id, model in new_block["models"].items()
+            }
+            providers[name_to_write] = merged
+        else:
+            providers[name_to_write] = new_block
         self._write(current)
         log(f"Updated OpenCode config at {self.config_path}")
         if new_block["options"]["apiKey"].startswith("{env:"):

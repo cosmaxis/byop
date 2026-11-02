@@ -9,12 +9,15 @@ the fixed schema PyTarget.build_fragment produces, so no PyYAML dep.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
+from ..config import ProviderConfig
 from .py import PyTarget
 
 DEFAULT_MODELS_PATH = Path.home() / ".omp" / "agent" / "models.yml"
@@ -45,9 +48,9 @@ def _yaml_scalar(value: object) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     s = str(value)
-    # Quote when value isn't a plain identifier/number/bool/null. This is
-    # the inverse of the parser's accepted unquoted forms.
-    if re.fullmatch(r"[A-Za-z0-9_\-./]+", s):
+    # YAML and the reader coerce unquoted booleans, nulls, and numbers.
+    reserved = {"true", "false", "null", "yes", "no", "on", "off", "y", "n", "inf", "infinity", "nan"}
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_./-]*", s) and s.lower() not in reserved:
         return s
     return "'" + s.replace("'", "''") + "'"
 
@@ -79,6 +82,8 @@ def _parse_models_yaml(text: str) -> dict:
         tok = tok.strip()
         if tok == "" or tok.lower() == "null" or tok == "~":
             return None
+        if tok == "{}":
+            return {}
         if tok.lower() == "true":
             return True
         if tok.lower() == "false":
@@ -137,6 +142,8 @@ def _parse_models_yaml(text: str) -> dict:
                 raise ValueError(f"Expected ':' in YAML line: {content!r}")
             key, _, rest = content.partition(":")
             key = key.strip()
+            if key.startswith(("'", '"')):
+                key = str(parse_scalar(key))
             rest = rest.strip()
             if rest == "":
                 state["idx"] += 1
@@ -255,7 +262,9 @@ def _emit_value(value: object, indent: int) -> list[str]:
         out: list[str] = []
         for k, v in value.items():
             if isinstance(v, (dict, list)):
-                if isinstance(v, dict) and v:
+                if isinstance(v, dict) and not v:
+                    out.append(f"{pad}{k}: {{}}")
+                elif isinstance(v, dict):
                     # Key on its own line, nested block follows indented.
                     out.append(f"{pad}{k}:")
                     out.extend(_emit_value(v, indent + 2))
@@ -348,34 +357,88 @@ class OmpTarget(PyTarget):
         profile: str | None = None,
         config_root: Path | None = None,
     ) -> None:
-        if models_path is None and profile is not None:
-            models_path = profile_models_path(profile, config_root)
-        super().__init__(models_path=models_path or DEFAULT_MODELS_PATH)
+        if models_path is None:
+            selected = profile if profile is not None else os.environ.get(
+                "OMP_PROFILE", os.environ.get("PI_PROFILE", "")
+            )
+            selected = selected.strip()
+            # OMP resolves PI_CONFIG_DIR under HOME, even when it starts with "/".
+            root = config_root or (Path.home() / (os.environ.get("PI_CONFIG_DIR") or ".omp").lstrip("/"))
+            if selected and selected != "default":
+                agent_dir = profile_models_path(selected, root).parent
+            else:
+                agent_override = os.environ.get("PI_CODING_AGENT_DIR") if config_root is None else None
+                agent_dir = Path(agent_override) if agent_override else root / "agent"
+            models_path = next(
+                (agent_dir / name for name in ("models.yml", "models.yaml", "models.json")
+                 if (agent_dir / name).exists()),
+                agent_dir / "models.yml",
+            )
+        super().__init__(models_path=models_path)
+
+    def _api_key_ref(
+        self, provider: ProviderConfig, *, use_keychain: bool | None = None, redact: bool = False
+    ) -> str:
+        if use_keychain is False and provider.api_key_env:
+            return provider.api_key_env
+        return super()._api_key_ref(provider, use_keychain=use_keychain, redact=redact)
 
     def _format_dry_run(self, fragment: dict) -> str:
         return _emit_models_yaml(fragment).rstrip("\n")
 
-    # omp reads ~/.omp/agent/models.yml (NOT models.json). Override _load /
-    # _write to round-trip the same fragment through YAML instead of JSON.
-    # No PyYAML dependency — a small stdlib emitter/parser handles the
-    # fixed schema PyTarget.build_fragment produces. The reader accepts
-    # the subset of YAML we emit plus JSON (in case a user previously ran
-    # an older byop that wrote models.json).
+    # omp reads models.yml (not models.json). Keep the YAML reader limited to
+    # byop's known schema, while writes leave other providers' raw text intact.
     # ------------------------------------------------------------------
     def _write(self, data: dict) -> None:
-        # omp's models.yml holds multiple providers and we don't own the
-        # whole file — MERGE: keep every other provider untouched, and
-        # replace the configured provider's entry wholesale. config.yml
-        # (which holds model roles like `default:`) is never touched by
-        # byop; the user picks the active model there.
+        # Rewrite only the selected provider; other YAML entries and their
+        # comments belong to the user and must stay byte-for-byte intact.
         existing = self._load()
-        new_providers = data.get("providers", {})
-        merged = dict(existing.get("providers") or {})
-        for name, block in new_providers.items():
-            merged[name] = block
-        text = _emit_models_yaml({"providers": merged})
+        previous = existing.get("providers") or {}
+        incoming = data.get("providers") or {}
+        changed = {name: block for name, block in incoming.items()
+                   if name not in previous or block != previous[name]}
+        if not changed:
+            return
+        text = self.models_path.read_text(encoding="utf-8") if self.models_path.exists() else ""
+        if text.lstrip().startswith("{"):
+            existing.setdefault("providers", {}).update(changed)
+            self.models_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+            return
+        if not text:
+            text = "providers:\n"
+        lines = text.splitlines(keepends=True)
+        root = next((i for i, line in enumerate(lines)
+                     if re.fullmatch(r"providers:\s*(?:#.*)?\n?", line)), None)
+        if root is None:
+            raise ValueError("OMP models.yml has no block-style providers section; edit it manually.")
+        end = next((i for i in range(root + 1, len(lines))
+                    if lines[i].strip() and not lines[i][0].isspace()), len(lines))
+        for name, block in changed.items():
+            headers = [
+                (i, len(line) - len(line.lstrip()), line.strip().split(":", 1)[0].strip("'\""))
+                for i, line in enumerate(lines[root + 1:end], root + 1)
+                if line.strip() and not line.lstrip().startswith("#")
+                and re.match(r"^\s+[^:]+:", line)
+            ]
+            indent = min((depth for _, depth, _ in headers), default=2)
+            siblings = [(i, key) for i, depth, key in headers if depth == indent]
+            start = next((i for i, key in siblings if key == name), end)
+            stop = next((i for i, _ in siblings if i > start), end)
+            if start != end:
+                while stop > start and (
+                    not lines[stop - 1].strip()
+                    or lines[stop - 1].lstrip().startswith("#")
+                ):
+                    stop -= 1
+            rendered = _emit_models_yaml({"providers": {name: block}}).splitlines(keepends=True)[1:]
+            if indent != 2:
+                rendered = [" " * indent + line[2:] for line in rendered]
+            if start and not lines[start - 1].endswith(("\n", "\r")):
+                lines[start - 1] += "\n"
+            lines[start:stop] = rendered
+            end += len(rendered) - (stop - start)
         self.models_path.parent.mkdir(parents=True, exist_ok=True)
-        self.models_path.write_text(text, encoding="utf-8")
+        self.models_path.write_text("".join(lines), encoding="utf-8")
 
     def _load(self) -> dict:
         if not self.models_path.exists():
@@ -385,7 +448,6 @@ class OmpTarget(PyTarget):
         stripped = text.lstrip()
         if stripped.startswith("{"):
             try:
-                import json
                 return json.loads(text) or {}
             except json.JSONDecodeError as exc:
                 raise RuntimeError(
