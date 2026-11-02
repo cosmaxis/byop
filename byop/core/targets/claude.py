@@ -130,11 +130,20 @@ class ClaudeTarget:
             }
         if self.auto_mode_model is not None:
             env["CLAUDE_CODE_AUTO_MODE_MODEL"] = self.auto_mode_model
-        helper = self._api_key_helper(provider, use_keychain=use_keychain)
-        if helper is not None:
-            fragment["apiKeyHelper"] = helper
+        # Claude applies settings env after the shell; blank competing credentials
+        # here rather than altering exports that other programs may need.
+        source = provider.api_key_env if use_keychain is False else None
+        if source in ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+            env["ANTHROPIC_API_KEY" if source == "ANTHROPIC_AUTH_TOKEN"
+                else "ANTHROPIC_AUTH_TOKEN"] = ""
         else:
-            env["ANTHROPIC_AUTH_TOKEN"] = "[REDACTED]" if redact else provider.api_key
+            env["ANTHROPIC_API_KEY"] = ""
+            helper = self._api_key_helper(provider, use_keychain=use_keychain)
+            if helper is not None:
+                fragment["apiKeyHelper"] = helper
+                env["ANTHROPIC_AUTH_TOKEN"] = ""
+            else:
+                env["ANTHROPIC_AUTH_TOKEN"] = "[REDACTED]" if redact else provider.api_key
         return fragment
 
     # ------------------------------------------------------------------
@@ -223,8 +232,8 @@ class ClaudeTarget:
         current_env = current.get("env")
         merged_env = dict(current_env) if isinstance(current_env, dict) else {}
         merged_env.pop("ANTHROPIC_API_KEY", None)
+        merged_env.pop("ANTHROPIC_AUTH_TOKEN", None)
         if "apiKeyHelper" in fragment:
-            merged_env.pop("ANTHROPIC_AUTH_TOKEN", None)
             merged["apiKeyHelper"] = fragment["apiKeyHelper"]
         else:
             merged.pop("apiKeyHelper", None)
@@ -244,7 +253,7 @@ class ClaudeTarget:
             "Note: Claude Code uses the Anthropic Messages API "
             f"({target_base_url}/v1/messages); ensure your gateway exposes it."
         )
-        if "apiKeyHelper" not in fragment:
+        if "apiKeyHelper" not in fragment and fragment["env"].get("ANTHROPIC_AUTH_TOKEN"):
             log("Warning: Claude Code stores the API key in settings.json as plaintext (--no-keychain).")
 
     @staticmethod

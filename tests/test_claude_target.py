@@ -84,7 +84,8 @@ def test_build_fragment_shape_with_keychain():
     frag = ClaudeTarget().build_fragment(_provider(), use_keychain=True)
     assert frag["env"]["ANTHROPIC_BASE_URL"] == "https://api.example.com"
     assert frag["env"]["BYOP_PROVIDER"] == "Cosmaxis"
-    assert "ANTHROPIC_AUTH_TOKEN" not in frag["env"]
+    assert frag["env"]["ANTHROPIC_AUTH_TOKEN"] == ""
+    assert frag["env"]["ANTHROPIC_API_KEY"] == ""
     assert frag["model"] == "hy3"
     assert frag["apiKeyHelper"].startswith("security find-internet-password")
     assert not frag["apiKeyHelper"].startswith("!")
@@ -193,20 +194,42 @@ def test_configure_preserves_env_and_cleans_legacy_keys_and_mode_switches(tmp_pa
     for legacy in ("provider", "apiBaseUrl", "apiKey", "models"):
         assert legacy not in data
     assert "apiKeyHelper" not in data
-    assert "ANTHROPIC_API_KEY" not in data["env"]
+    assert data["env"]["ANTHROPIC_API_KEY"] == ""
     assert data["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-12345678"
     assert data["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert data["permissions"] == {"allow": ["Bash(pytest)"]}
 
-    # Switching back to Keychain removes ANTHROPIC_AUTH_TOKEN so it cannot shadow apiKeyHelper.
+    # Switching to Keychain neutralizes inherited credentials as well as stale settings.
     with mock.patch("byop.core.targets.claude.kc.keychain_has", return_value=True), \
          mock.patch("byop.core.targets.claude.kc.ensure_key", return_value=["keychain:x"]):
         target.configure(_provider(), use_keychain=True, log=lambda m: None)
     data2 = json.loads(settings.read_text())
-    assert "ANTHROPIC_API_KEY" not in data2["env"]
-    assert "ANTHROPIC_AUTH_TOKEN" not in data2["env"]
+    assert data2["env"]["ANTHROPIC_API_KEY"] == ""
+    assert data2["env"]["ANTHROPIC_AUTH_TOKEN"] == ""
     assert data2["apiKeyHelper"].startswith("security find-internet-password")
     assert data2["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+
+
+@pytest.mark.parametrize("source,other", [
+    ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"),
+    ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
+])
+def test_configure_preserves_reserved_environment_credential(tmp_path, source, other):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({
+        "apiKeyHelper": "old-helper",
+        "env": {source: "stale", other: "stale"},
+    }))
+    notices = []
+    ClaudeTarget(settings).configure(
+        _provider(api_key_env=source), use_keychain=False, use_env=True, log=notices.append,
+    )
+    data = json.loads(settings.read_text())
+    assert source not in data["env"]
+    assert data["env"][other] == ""
+    assert "apiKeyHelper" not in data
+    assert "sk-12345678" not in settings.read_text()
+    assert not any("plaintext" in message for message in notices)
 
 
 def test_configure_dry_run_never_leaks_secret_or_touches_keychain(tmp_path):
