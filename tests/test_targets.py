@@ -372,6 +372,7 @@ def test_stale_configuration_directories_do_not_imply_apps_are_installed(tmp_pat
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(shutil, "which", lambda _: None)
     monkeypatch.setattr("byop.core.targets.warp.WARP_APP", tmp_path / "Warp.app")
+    monkeypatch.setattr("byop.core.targets.opencode.OPENCODE_APP", tmp_path / "OpenCode.app")
     paths = [
         tmp_path / ".pi" / "agent" / "models.json",
         tmp_path / ".omp" / "agent" / "models.yml",

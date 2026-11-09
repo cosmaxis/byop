@@ -35,7 +35,7 @@ The optional key check uses an OpenAI-compatible models request and does not run
 | [Zed](https://zed.dev) | `zed` | Per model |
 | [Pi](https://pi.dev) | `py` | Per model |
 | [Oh My Pi](https://omp.sh) | `omp` | Per model |
-| [OpenCode](https://opencode.ai) | `opencode` | Per model |
+| [OpenCode CLI and Desktop](https://opencode.ai) | `opencode` | Per model |
 | [Claude Code](https://code.claude.com/docs/) | `claude` | First model; session-wide |
 | [Codex](https://developers.openai.com/codex/) | `codex` | Context only |
 | [Warp](https://docs.warp.dev/agents/inference/custom-inference-endpoint/) | `warp` | Not supported by its endpoint schema |
@@ -89,8 +89,9 @@ Remove `--dry-run` to apply. Command-line arguments can expose keys to other pro
 
 - **Claude Code** requires an Anthropic Messages-compatible `/v1/messages` gateway, not only OpenAI compatibility. BYOP prevents inherited `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` values from overriding its configured credential; environment-backed profiles using either variable retain that variable as their credential. Project or managed settings can override the global settings. See [Claude's context restrictions](https://code.claude.com/docs/en/model-config#correct-the-window-for-a-gateway-or-custom-model-id).
 - **Codex** requires an OpenAI Responses-compatible gateway. It supports one active provider and rejects `--conflict append`.
+- **OpenCode** uses one target for CLI and Desktop. The default Keychain setup installs a local OpenCode plugin that reads the key for each request; keep plugins enabled and restart OpenCode after applying. If the configured endpoint changes outside byop, reapply the profile. Environment-backed profiles still require the variable to be available to OpenCode Desktop.
 - **Warp** requires public HTTPS and a compatible installed schema plus Keychain access; otherwise setup is manual. Save your work, fully quit Warp, reopen it, and choose the custom model. Prompts, context, endpoint URL, and key pass through Warp's servers. See [Warp's endpoint requirements](https://docs.warp.dev/agents/inference/custom-inference-endpoint/).
-- **Keys** default to macOS Keychain. `--env-key` writes a plaintext shell export; `--no-keychain` can write plaintext to tool settings. Environment-backed profiles reuse their variable. Zed adds a shell reference under its required name and refuses to overwrite an existing export. OpenCode's Keychain-backed export needs a new terminal. Older profiles may have shell exports that byop did not record. Providers sharing a Keychain URL must use the same key.
+- **Keys** default to macOS Keychain. `--env-key` writes a plaintext shell export; `--no-keychain` can write plaintext to tool settings. Environment-backed profiles reuse their variable. Zed adds a shell reference under its required name and refuses to overwrite an existing export. Older profiles may have shell exports that byop did not record. Providers sharing a Keychain URL must use the same key.
 
 Byop preserves unrelated settings, including Oh My Pi’s string-valued model IDs and headers. Use `--conflict replace` or `skip` for an existing provider; `append` applies only to Pi, Oh My Pi, and OpenCode. Review a dry run before changing customized tools.
 
