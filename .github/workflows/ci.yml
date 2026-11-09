@@ -19,7 +19,7 @@ permissions:
 jobs:
   test:
     name: Lint, Type-check & Test (macOS)
-    runs-on: macos-latest
+    runs-on: macos-15
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
@@ -47,7 +47,7 @@ jobs:
 
   build:
     name: Build distribution
-    runs-on: macos-latest
+    runs-on: macos-15
     needs: test
     steps:
       - uses: actions/checkout@v4
