@@ -66,6 +66,12 @@ jobs:
           name: dist
           path: dist/*
 
+  hosted_probe:
+    name: Probe Linux hosted runner
+    runs-on: ubuntu-latest
+    steps:
+      - run: uname -sm
+
   publish:
     name: Publish or roll back release
     if: >-
