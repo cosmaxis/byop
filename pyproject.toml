@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "byop"
-version = "2.1.12"
+version = "2.1.13"
 description = "Bring Your Own Provider (BYOP): interactive CLI to wire a custom OpenAI-compatible LLM provider into Zed, py.dev, and other AI coding tools"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -60,4 +60,4 @@ testpaths = ["tests"]
 addopts = "-q"
 
 [tool.setuptools.package-data]
-byop = ["py.typed"]
+byop = ["py.typed", "core/targets/opencode-keychain.js"]

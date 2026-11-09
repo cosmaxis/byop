@@ -4,10 +4,9 @@ OpenCode (https://opencode.ai) stores its configuration at
 ``~/.config/opencode/opencode.json`` (or ``opencode.jsonc``). Providers live
 under the top-level ``provider`` key, keyed by a user-chosen name.
 
-OpenCode supports ``{env:VAR}`` and ``{file:path}`` variable substitution in
-``opencode.json`` — NOT ``!command`` shell execution. To keep plaintext secrets
-out of ``opencode.json``, we embed ``{env:<PROVIDER>_API_KEY}`` and export that
-variable dynamically from the macOS login keychain in the user's shell profile.
+OpenCode supports ``{env:VAR}`` and ``{file:path}`` substitution, but not
+shell commands. A local OpenCode plugin also reads Keychain at request time
+so Desktop does not depend on inheriting the user's shell environment.
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ from .. import settings as sett
 from ..config import ModelConfig, ProviderConfig
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "opencode" / "opencode.json"
+OPENCODE_APP = Path("/Applications/OpenCode.app")
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -33,29 +33,36 @@ class OpencodeTarget:
     """Configures OpenCode with a custom OpenAI-compatible provider."""
 
     name = "opencode"
-    display_name = "OpenCode"
+    display_name = "OpenCode (CLI + Desktop)"
 
     def __init__(self, config_path: Path = DEFAULT_CONFIG_PATH) -> None:
         self.config_path = config_path
 
     # ------------------------------------------------------------------
     def is_installed(self) -> bool:
-        return shutil.which("opencode") is not None
+        return (
+            shutil.which("opencode") is not None
+            or OPENCODE_APP.exists()
+            or (Path.home() / "Applications" / "OpenCode.app").exists()
+        )
 
     def install(self, log: Callable[[str], None] = print) -> None:
         if shutil.which("brew") is not None:
-            log("Installing OpenCode via Homebrew...")
-            res = _run(["brew", "install", "--cask", "opencode"])
-            if res.returncode == 0:
-                log("OpenCode installed via Homebrew.")
-                return
-            log(
-                f"brew install failed: {res.stderr or res.stdout}; "
-                f"falling back to the published installer."
-            )
-        log("Install OpenCode with one of:")
-        log("  brew install --cask opencode")
-        log("  curl -fsSL https://opencode.ai/install | sh")
+            for command in (
+                ["brew", "install", "opencode"],
+                ["brew", "install", "--cask", "opencode-desktop"],
+            ):
+                log(f"Installing {' '.join(command[2:])}...")
+                result = _run(command)
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"{' '.join(command)} failed: {result.stderr or result.stdout}"
+                    )
+            log("OpenCode CLI and Desktop installed.")
+            return
+        log("Install OpenCode CLI and Desktop with Homebrew:")
+        log("  brew install opencode")
+        log("  brew install --cask opencode-desktop")
         log("then re-run byop.")
 
     # ------------------------------------------------------------------
@@ -127,6 +134,27 @@ class OpencodeTarget:
             },
         }
         return {"provider": {provider.provider_name: provider_block}}
+
+    def _configure_keychain_plugin(self, name: str, server: str | None) -> None:
+        plugins = self.config_path.parent / "plugins"
+        mapping_path = plugins / "byop-keychain.json"
+        if server is None and not mapping_path.exists():
+            return
+        try:
+            mapping = json.loads(mapping_path.read_text(encoding="utf-8")) if mapping_path.exists() else {}
+            if not isinstance(mapping, dict) or not all(isinstance(value, str) for value in mapping.values()):
+                raise ValueError("expected provider names mapped to Keychain servers")
+            if server is None:
+                mapping.pop(name, None)
+            else:
+                mapping[name] = server
+            plugins.mkdir(parents=True, exist_ok=True)
+            if server is not None:
+                source = Path(__file__).with_name("opencode-keychain.js").read_bytes()
+                sett.atomic_write(plugins / "byop-keychain.js", source)
+            sett.atomic_write(mapping_path, (json.dumps(mapping, indent=2) + "\n").encode())
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"Could not configure OpenCode Keychain integration: {exc}") from exc
 
     # ------------------------------------------------------------------
     def configure(
@@ -200,10 +228,13 @@ class OpencodeTarget:
 
         fragment = self.build_fragment(
             provider,
-            use_keychain=False if not use_keychain else None,
+            use_keychain=use_keychain,
             use_env=use_env,
         )
         new_block = fragment["provider"][provider.provider_name]
+        self._configure_keychain_plugin(
+            name_to_write, provider.keychain_server() if use_keychain else None
+        )
 
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         current = self._load()

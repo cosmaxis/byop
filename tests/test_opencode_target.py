@@ -1,6 +1,8 @@
 """Tests for the OpenCode target."""
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from unittest import mock
@@ -202,17 +204,82 @@ def test_opencode_registered_in_default_registry():
     assert DEFAULT_CONFIG_PATH.name == "opencode.json"
 
 
-def test_opencode_install_via_brew_when_present():
-    calls = []
+def test_opencode_detects_desktop_without_cli(tmp_path, monkeypatch):
+    desktop = tmp_path / "Applications" / "OpenCode.app"
+    desktop.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr("byop.core.targets.opencode.OPENCODE_APP", tmp_path / "missing.app")
+    monkeypatch.setattr(shutil, "which", lambda _: None)
 
-    def _run(cmd, *a, **k):
-        calls.append(cmd)
-        r = mock.Mock(returncode=0, stdout="", stderr="")
-        return r
+    assert OpencodeTarget(tmp_path / "opencode.json").is_installed()
 
-    with mock.patch(
-        "byop.core.targets.opencode.shutil.which",
-        side_effect=lambda n: "/opt/homebrew/bin/brew" if n == "brew" else None,
-    ), mock.patch("byop.core.targets.opencode._run", _run):
-        OpencodeTarget().install(log=lambda m: None)
-    assert any("brew" in c and "install" in c for c in calls)
+
+def test_opencode_keychain_profiles_remain_isolated(tmp_path, monkeypatch):
+    target = OpencodeTarget(tmp_path / "opencode.json")
+    monkeypatch.setattr("byop.core.targets.opencode.kc.ensure_key", lambda **kwargs: [])
+    monkeypatch.setattr("byop.core.targets.opencode.kc.keychain_has", lambda server: False)
+
+    target.configure(_provider(), use_keychain=True, log=lambda _: None)
+    config = json.loads(target.config_path.read_text())
+    assert config["provider"]["Cosmaxis"]["options"]["apiKey"] == "{env:COSMAXIS_API_KEY}"
+    assert "sk-12345678" not in target.config_path.read_text()
+
+    other = _provider(api_url="https://other.example.com/v1")
+    target.configure(other, use_keychain=True, conflict_action="append", log=lambda _: None)
+    mapping_path = tmp_path / "plugins" / "byop-keychain.json"
+    assert json.loads(mapping_path.read_text()) == {
+        "Cosmaxis": "https://api.example.com/v1",
+        "Cosmaxis_2": "https://other.example.com/v1",
+    }
+
+    target.configure(_provider(), use_keychain=False, use_env=True, log=lambda _: None)
+    assert json.loads(mapping_path.read_text()) == {"Cosmaxis_2": "https://other.example.com/v1"}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node is needed to exercise the OpenCode plugin")
+def test_opencode_keychain_plugin_rejects_changed_endpoints(tmp_path):
+    source = Path(__file__).resolve().parents[1] / "byop/core/targets/opencode-keychain.js"
+    plugin = tmp_path / "byop-keychain.mjs"
+    plugin.write_bytes(source.read_bytes())
+    (tmp_path / "byop-keychain.json").write_text(
+        json.dumps({"Cosmaxis": "https://api.example.com/v1"})
+    )
+    script = """
+const plugin = (await import(process.argv[1])).default;
+const headers = {};
+const hooks = await plugin.server();
+try {
+  await hooks["chat.headers"](
+    {model: {providerID: "Cosmaxis"}, provider: {options: {baseURL: "https://evil.example/v1"}}},
+    {headers},
+  );
+  throw new Error("legacy hook accepted a changed endpoint");
+} catch (error) {
+  if (!error.message.includes("endpoint changed")) throw error;
+}
+let requestHook;
+await plugin.setup({session: {hook: async (_, callback) => { requestHook = callback; }}});
+for (const url of ["https://evil.example/v1/chat/completions", "https://api.example.com/v1-evil"]) {
+  const request = new Request(url);
+  try {
+    requestHook({model: {providerID: "Cosmaxis"}, request});
+    throw new Error("desktop hook accepted a changed endpoint");
+  } catch (error) {
+    if (!error.message.includes("endpoint changed")) throw error;
+    if (request.headers.has("authorization")) throw new Error("credential leaked");
+  }
+}
+if (Object.hasOwn(headers, "Authorization")) throw new Error("credential leaked");
+"""
+    subprocess.run(["node", "--input-type=module", "-e", script, plugin.as_uri()], check=True)
+
+
+def test_opencode_reports_desktop_install_failure(monkeypatch):
+    monkeypatch.setattr("byop.core.targets.opencode.shutil.which", lambda _: "/opt/homebrew/bin/brew")
+    results = iter([
+        mock.Mock(returncode=0),
+        mock.Mock(returncode=1, stderr="desktop installation failed", stdout=""),
+    ])
+    monkeypatch.setattr("byop.core.targets.opencode._run", lambda _: next(results))
+    with pytest.raises(RuntimeError, match="desktop installation failed"):
+        OpencodeTarget().install(log=lambda _: None)
