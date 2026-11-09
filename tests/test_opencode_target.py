@@ -204,14 +204,105 @@ def test_opencode_registered_in_default_registry():
     assert DEFAULT_CONFIG_PATH.name == "opencode.json"
 
 
-def test_opencode_detects_desktop_without_cli(tmp_path, monkeypatch):
-    desktop = tmp_path / "Applications" / "OpenCode.app"
-    desktop.mkdir(parents=True)
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setattr("byop.core.targets.opencode.OPENCODE_APP", tmp_path / "missing.app")
-    monkeypatch.setattr(shutil, "which", lambda _: None)
+@pytest.mark.parametrize(("installed", "mode"), [
+    ("cli", "interactive"), ("desktop", "interactive"),
+    ("cli", "scripted"), ("desktop", "scripted"),
+    ("cli", "skip"), ("desktop", "skip"),
+    ("none", "interactive"), ("both", "interactive"),
+])
+def test_setup_installs_only_missing_opencode_companion(tmp_path, monkeypatch, installed, mode):
+    from byop import cli
+    from byop.core import keychain as kc
+    from byop.core import targets
 
-    assert OpencodeTarget(tmp_path / "opencode.json").is_installed()
+    app = tmp_path / "OpenCode.app"
+    if installed in {"desktop", "both"}:
+        app.mkdir()
+    state = {"cli": installed in {"cli", "both"}}
+    commands = []
+    prompts = []
+    hints = []
+    target = OpencodeTarget(tmp_path / "opencode.json")
+    monkeypatch.setattr("byop.core.targets.opencode.OPENCODE_APP", app)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path / "byop"))
+    monkeypatch.setattr(targets, "available_targets", lambda **kwargs: [target])
+    monkeypatch.setattr(kc, "keychain_set", lambda *args, **kwargs: None)
+    monkeypatch.setattr(kc, "ensure_key", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        shutil, "which",
+        lambda name: "/opt/homebrew/bin/brew" if name == "brew" else (
+            "/opt/homebrew/bin/opencode" if name == "opencode" and state["cli"] else None
+        ),
+    )
+
+    def install(command):
+        commands.append(command)
+        if command == ["brew", "install", "opencode"]:
+            state["cli"] = True
+        elif command == ["brew", "install", "--cask", "opencode-desktop"]:
+            app.mkdir()
+        else:
+            raise AssertionError(f"Unexpected installation: {command}")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("byop.core.targets.opencode._run", install)
+    monkeypatch.setattr(
+        cli.prompt, "select_many",
+        lambda title, labels, **kwargs: hints.extend(kwargs["hints"]) or [0],
+    )
+    monkeypatch.setattr(
+        cli.prompt, "confirm",
+        lambda question, default=False: prompts.append(question) or True,
+    )
+    argv = [
+        "apply", "--provider", "Cosmaxis", "--api-url", "https://api.example.com/v1",
+        "--api-key", "sk-12345678", "--model", "hy3",
+    ]
+    if mode == "skip":
+        argv.append("--skip-install")
+    args = cli.build_parser().parse_args(argv)
+    assert cli._run_apply(args, interactive_session=mode == "interactive") == 0
+
+    expected = {
+        "cli": [["brew", "install", "--cask", "opencode-desktop"]],
+        "desktop": [["brew", "install", "opencode"]],
+        "none": [["brew", "install", "opencode"], ["brew", "install", "--cask", "opencode-desktop"]],
+        "both": [],
+    }[installed]
+    assert commands == ([] if mode == "skip" else expected)
+    assert target.is_installed() is (mode != "skip")
+    assert json.loads(target.config_path.read_text())["provider"]["Cosmaxis"]["models"]["hy3"]
+    hint = "not installed" if installed == "none" else "installed" if installed == "both" else "partially installed"
+    assert hints == ([hint] if mode == "interactive" else [])
+    assert len(prompts) == (1 if mode == "interactive" and installed != "both" else 0)
+
+
+def test_status_and_doctor_report_partial_opencode_installation(tmp_path, monkeypatch):
+    from byop import cli
+    from byop.core import profiles, targets
+
+    target = OpencodeTarget(tmp_path / "opencode.json")
+    target.config_path.write_text(json.dumps({"provider": {"Cosmaxis": {}}}))
+    monkeypatch.setattr("byop.core.targets.opencode.OPENCODE_APP", tmp_path / "OpenCode.app")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("BYOP_CONFIG_DIR", str(tmp_path / "byop"))
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/local/bin/opencode" if name == "opencode" else None)
+    monkeypatch.setattr(targets, "available_targets", lambda **kwargs: [target])
+    profile = profiles.profile_from_provider(_provider(), name="Cosmaxis")
+    profiles.save_profile(profile)
+    profiles.set_active_profile_name("Cosmaxis")
+    messages = []
+    monkeypatch.setattr(
+        cli.prompt, "step",
+        lambda name, detail, status: messages.append((name, detail, status)),
+    )
+
+    assert cli._run_status() == 0
+    assert any("partially installed" in detail and status == "warn" for _, detail, status in messages)
+    messages.clear()
+    assert cli._run_doctor() == 1
+    assert any("partially installed" in detail and status == "warn" for _, detail, status in messages)
 
 
 def test_opencode_keychain_profiles_remain_isolated(tmp_path, monkeypatch):
@@ -274,12 +365,16 @@ if (Object.hasOwn(headers, "Authorization")) throw new Error("credential leaked"
     subprocess.run(["node", "--input-type=module", "-e", script, plugin.as_uri()], check=True)
 
 
-def test_opencode_reports_desktop_install_failure(monkeypatch):
-    monkeypatch.setattr("byop.core.targets.opencode.shutil.which", lambda _: "/opt/homebrew/bin/brew")
-    results = iter([
-        mock.Mock(returncode=0),
-        mock.Mock(returncode=1, stderr="desktop installation failed", stdout=""),
-    ])
-    monkeypatch.setattr("byop.core.targets.opencode._run", lambda _: next(results))
+def test_opencode_reports_desktop_install_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr("byop.core.targets.opencode.OPENCODE_APP", tmp_path / "OpenCode.app")
+    monkeypatch.setattr(
+        "byop.core.targets.opencode.shutil.which",
+        lambda name: "/opt/homebrew/bin/" + name if name in {"brew", "opencode"} else None,
+    )
+    monkeypatch.setattr(
+        "byop.core.targets.opencode._run",
+        lambda _: mock.Mock(returncode=1, stderr="desktop installation failed", stdout=""),
+    )
     with pytest.raises(RuntimeError, match="desktop installation failed"):
         OpencodeTarget().install(log=lambda _: None)
