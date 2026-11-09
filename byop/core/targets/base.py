@@ -6,7 +6,9 @@ integration, ...) that can be wired to a custom OpenAI-compatible provider.
 Each target exposes:
 
 * ``name`` / ``display_name`` — identifiers and a human label.
-* ``is_installed()`` — whether the app is present on this machine.
+* ``is_installed()`` — whether all required components are present.
+* ``is_present()`` (optional) — whether any component is present; defaults to
+  ``is_installed()`` for single-component targets.
 * ``install(log)`` — install or upgrade the app to the latest version.
 * ``configure(provider, ...)`` — write the provider config for that app.
 * ``current_provider_names()`` — providers already configured (for UX).
@@ -67,9 +69,9 @@ class Target(Protocol):
 
 
 def detect_installed(targets: list[Target]) -> list[Target]:
-    """Return the subset of ``targets`` that are installed."""
+    """Return targets with at least one installed component."""
 
-    return [t for t in targets if t.is_installed()]
+    return [t for t in targets if getattr(t, "is_present", t.is_installed)()]
 
 
 def configure_all(

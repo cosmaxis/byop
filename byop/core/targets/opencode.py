@@ -39,31 +39,38 @@ class OpencodeTarget:
         self.config_path = config_path
 
     # ------------------------------------------------------------------
+    def _desktop_installed(self) -> bool:
+        return OPENCODE_APP.exists() or (Path.home() / "Applications" / "OpenCode.app").exists()
+
+    def is_present(self) -> bool:
+        return shutil.which("opencode") is not None or self._desktop_installed()
+
     def is_installed(self) -> bool:
-        return (
-            shutil.which("opencode") is not None
-            or OPENCODE_APP.exists()
-            or (Path.home() / "Applications" / "OpenCode.app").exists()
-        )
+        return shutil.which("opencode") is not None and self._desktop_installed()
 
     def install(self, log: Callable[[str], None] = print) -> None:
-        if shutil.which("brew") is not None:
-            for command in (
-                ["brew", "install", "opencode"],
-                ["brew", "install", "--cask", "opencode-desktop"],
-            ):
-                log(f"Installing {' '.join(command[2:])}...")
-                result = _run(command)
-                if result.returncode != 0:
-                    raise RuntimeError(
-                        f"{' '.join(command)} failed: {result.stderr or result.stdout}"
-                    )
-            log("OpenCode CLI and Desktop installed.")
+        commands = []
+        if shutil.which("opencode") is None:
+            commands.append(["brew", "install", "opencode"])
+        if not self._desktop_installed():
+            commands.append(["brew", "install", "--cask", "opencode-desktop"])
+        if not commands:
+            log("OpenCode CLI and Desktop are already installed.")
             return
-        log("Install OpenCode CLI and Desktop with Homebrew:")
-        log("  brew install opencode")
-        log("  brew install --cask opencode-desktop")
-        log("then re-run byop.")
+        if shutil.which("brew") is None:
+            log("Install the missing OpenCode components with Homebrew:")
+            for command in commands:
+                log(f"  {' '.join(command)}")
+            log("then re-run byop.")
+            return
+        for command in commands:
+            log(f"Installing {' '.join(command[2:])}...")
+            result = _run(command)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"{' '.join(command)} failed: {result.stderr or result.stdout}"
+                )
+        log("OpenCode CLI and Desktop installed.")
 
     # ------------------------------------------------------------------
     def _api_key_ref(

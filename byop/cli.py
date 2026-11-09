@@ -584,7 +584,11 @@ def _run_status(
         installed = target.is_installed()
         cfg_path = _target_config_path(target)
         if not installed:
-            prompt.step(target.display_name, "not installed", status="skip")
+            if getattr(target, "is_present", target.is_installed)():
+                unconfigured += 1
+                prompt.step(target.display_name, "partially installed", status="warn")
+            else:
+                prompt.step(target.display_name, "not installed", status="skip")
         elif profile.provider_name in names:
             detail = f"configured · {cfg_path}" if cfg_path else "configured"
             prompt.step(target.display_name, detail, status="ok")
@@ -1102,6 +1106,14 @@ def _run_doctor(
     checked = 0
     for target in targets:
         if not target.is_installed():
+            if getattr(target, "is_present", target.is_installed)():
+                checked += 1
+                issues += 1
+                prompt.step(
+                    target.display_name,
+                    f"partially installed → byop apply --target {target.name}",
+                    status="warn",
+                )
             continue
         checked += 1
         names = target.current_provider_names()
@@ -1348,6 +1360,8 @@ def _select_targets(
     for target in all_targets:
         if target.name not in installed_names:
             hints.append("not installed")
+        elif not target.is_installed():
+            hints.append("partially installed")
         elif active_provider and active_provider in _safe_provider_names(target):
             hints.append("configured")
         else:
