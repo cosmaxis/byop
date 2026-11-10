@@ -196,6 +196,161 @@ def test_opencode_current_provider_names(tmp_path):
     assert sorted(target.current_provider_names()) == ["Cosmaxis", "OtherOne"]
 
 
+@pytest.mark.parametrize("has_legacy", [False, True])
+def test_opencode_replaces_native_provider_and_preserves_unmanaged_metadata(tmp_path, has_legacy):
+    cfg = tmp_path / "opencode.json"
+    old_url = "https://old.example/v1"
+    data = {
+        "providers": {
+            "Cosmaxis": {
+                "name": "Old",
+                "package": "@opencode/ai/providers/openai/responses",
+                "settings": {
+                    "baseURL": old_url, "apiKey": "old-key", "timeout": 123,
+                    "headers": {"Authorization": "old", "X-Setting": "keep"},
+                },
+                "headers": {"Authorization": "old", "X-Team": "keep"},
+                "compatibility": {"reasoningField": "reasoning_text", "streamUsage": False},
+                "models": {
+                    "pro": {
+                        "name": "Old", "modelID": "old-alias", "type": "image",
+                        "package": "@opencode/ai/providers/openai/responses", "disabled": True,
+                        "settings": {"baseURL": old_url, "apiKey": "old", "timeout": 222},
+                        "headers": {"authorization": "old", "X-Model": "keep"},
+                        "capabilities": {
+                            "tools": True, "input": ["text", "audio", "image"], "temperature": False,
+                            "reasoning": {"supported": True, "effort": ["high"]},
+                        },
+                        "compatibility": {"reasoningField": "reasoning_text", "requireFinishReason": False},
+                        "limit": {"context": 100, "output": 10},
+                        "variants": [{
+                            "id": "safe", "settings": {"baseURL": old_url, "apiKey": "old", "timeout": 333},
+                            "headers": {"Authorization": "old", "X-Variant": "keep"},
+                        }],
+                        "cost": {"input": 1, "output": 2},
+                    },
+                    "obsolete": {"name": "Obsolete"},
+                },
+            },
+            "Other": {"name": "untouched"},
+        },
+        "username": "keep",
+    }
+    if has_legacy:
+        data["provider"] = {"Cosmaxis": {
+            "options": {"baseURL": old_url, "apiKey": "old", "headers": {"Authorization": "old", "X-Legacy": "keep"}},
+            "models": {"pro": {
+                "id": "old-alias", "provider": {"npm": "@ai-sdk/anthropic", "api": old_url},
+                "options": {"baseURL": old_url, "apiKey": "old", "headers": {"Authorization": "old", "X-Option": "keep"}},
+                "headers": {"Authorization": "old", "X-Legacy-Model": "keep"},
+                "variants": {"safe": {"baseURL": old_url, "apiKey": "old", "headers": {"Authorization": "old", "X-Variant": "keep"}}},
+            }},
+        }}
+    cfg.write_text(json.dumps(data))
+    provider = _provider(api_key_env="CUSTOM_KEY", models=[ModelConfig(
+        name="pro", max_tokens=500000, max_output_tokens=16000,
+        reasoning_effort="none", capabilities={"tools": False, "images": False},
+    )])
+    target = OpencodeTarget(cfg)
+    assert set(target.current_provider_names()) == {"Cosmaxis", "Other"}
+    target.configure(provider, use_keychain=False, use_env=True, conflict_action="replace", log=lambda _: None)
+
+    updated = json.loads(cfg.read_text())
+    native = updated["providers"]["Cosmaxis"]
+    assert updated["username"] == "keep" and updated["providers"]["Other"] == {"name": "untouched"}
+    assert native["package"] == "aisdk:@ai-sdk/openai-compatible"
+    assert native["settings"] == {
+        "baseURL": "https://api.example.com/v1", "apiKey": "{env:CUSTOM_KEY}", "timeout": 123,
+        "headers": {"X-Setting": "keep"},
+    }
+    assert native["headers"] == {"X-Team": "keep"}
+    assert native["compatibility"] == {"streamUsage": False}
+    assert set(native["models"]) == {"pro"}
+    model = native["models"]["pro"]
+    assert model["modelID"] == "pro" and model["type"] == "chat" and model["disabled"] is False
+    assert "package" not in model and model["settings"] == {"timeout": 222}
+    assert model["headers"] == {"X-Model": "keep"}
+    assert model["limit"] == {"context": 500000, "output": 16000}
+    assert model["capabilities"] == {
+        "tools": False, "input": ["text", "audio"], "temperature": False,
+        "reasoning": {"supported": False},
+    }
+    assert model["compatibility"] == {"requireFinishReason": False}
+    assert model["cost"] == {"input": 1, "output": 2}
+    assert model["variants"] == [{"id": "safe", "settings": {"timeout": 333}, "headers": {"X-Variant": "keep"}}]
+    legacy = updated["provider"]["Cosmaxis"]
+    assert legacy["options"]["baseURL"] == "https://api.example.com/v1"
+    assert legacy["options"]["apiKey"] == "{env:CUSTOM_KEY}"
+    if has_legacy:
+        assert legacy["options"]["headers"] == {"X-Legacy": "keep"}
+        assert legacy["models"]["pro"]["id"] == "pro"
+        assert "provider" not in legacy["models"]["pro"]
+        assert legacy["models"]["pro"]["options"] == {"headers": {"X-Option": "keep"}}
+        assert legacy["models"]["pro"]["headers"] == {"X-Legacy-Model": "keep"}
+        assert legacy["models"]["pro"]["variants"] == {"safe": {"headers": {"X-Variant": "keep"}}}
+    assert target.export_config()["opencode"]["providers"]["Cosmaxis"] == native
+
+
+def test_opencode_native_collision_skip_and_append_use_both_maps(tmp_path):
+    cfg = tmp_path / "opencode.json"
+    data = {
+        "provider": {"Cosmaxis_2": {"name": "legacy"}},
+        "providers": {"Cosmaxis": {"name": "native"}, "Cosmaxis_3": {"name": "native three"}},
+    }
+    original = json.dumps(data)
+    cfg.write_text(original)
+    target = OpencodeTarget(cfg)
+    provider = _provider(api_key_env="CUSTOM_KEY")
+    target.configure(provider, use_keychain=False, use_env=True, conflict_action="skip", log=lambda _: None)
+    assert cfg.read_text() == original
+    target.configure(provider, use_keychain=False, use_env=True, conflict_action="append", log=lambda _: None)
+    updated = json.loads(cfg.read_text())
+    assert updated["providers"] == data["providers"]
+    assert updated["provider"]["Cosmaxis_2"] == data["provider"]["Cosmaxis_2"]
+    assert updated["provider"]["Cosmaxis_4"]["options"]["baseURL"] == "https://api.example.com/v1"
+
+
+def test_opencode_native_dry_run_redacts_existing_and_new_credentials(tmp_path):
+    cfg = tmp_path / "opencode.json"
+    original = json.dumps({"providers": {"Cosmaxis": {
+        "settings": {"baseURL": "https://old.example/v1", "apiKey": "old-native-secret"},
+        "headers": {"X-Secret": "unmanaged-secret"},
+    }}})
+    cfg.write_text(original)
+    logs = []
+    target = OpencodeTarget(cfg)
+    with mock.patch("byop.core.targets.opencode.kc.ensure_key") as ensure:
+        target.configure(_provider(), dry_run=True, use_keychain=False, use_env=False, log=logs.append)
+    ensure.assert_not_called()
+    output = "\n".join(logs)
+    assert '"providers"' in output and "[REDACTED]" in output
+    assert all(secret not in output for secret in ("old-native-secret", "unmanaged-secret", "sk-12345678"))
+    assert cfg.read_text() == original
+
+
+def test_opencode_native_model_capabilities_follow_profile(tmp_path):
+    cfg = tmp_path / "opencode.json"
+    cfg.write_text(json.dumps({"providers": {"Cosmaxis": {"models": {"hy3": {}}}}}))
+    target = OpencodeTarget(cfg)
+    target.configure(_provider(api_key_env="CUSTOM_KEY"), use_keychain=False, use_env=True, log=lambda _: None)
+    model = json.loads(cfg.read_text())["providers"]["Cosmaxis"]["models"]["hy3"]
+    assert model["capabilities"]["input"] == ["text", "image"]
+    assert model["capabilities"]["reasoning"] == {"supported": True}
+    assert model["compatibility"]["reasoningField"] == "reasoning_content"
+
+
+def test_opencode_rejects_invalid_native_variants_before_keychain_writes(tmp_path):
+    cfg = tmp_path / "opencode.json"
+    original = json.dumps({"providers": {"Cosmaxis": {"models": {"hy3": {"variants": "invalid"}}}}})
+    cfg.write_text(original)
+    target = OpencodeTarget(cfg)
+    with mock.patch("byop.core.targets.opencode.kc.ensure_key") as ensure:
+        with pytest.raises(ValueError, match="variants must be an array"):
+            target.configure(_provider(), log=lambda _: None)
+    ensure.assert_not_called()
+    assert cfg.read_text() == original
+
+
 def test_opencode_registered_in_default_registry():
     from byop.core.targets import available_targets
 
