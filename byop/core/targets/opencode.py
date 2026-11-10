@@ -1,8 +1,7 @@
 """OpenCode target: wires a custom OpenAI-compatible provider into OpenCode.
 
-OpenCode (https://opencode.ai) stores its configuration at
-``~/.config/opencode/opencode.json`` (or ``opencode.jsonc``). Providers live
-under the top-level ``provider`` key, keyed by a user-chosen name.
+OpenCode stores global settings in ``~/.config/opencode/opencode.json``.
+Legacy providers use ``provider``; native V2 providers use ``providers``.
 
 OpenCode supports ``{env:VAR}`` and ``{file:path}`` substitution, but not
 shell commands. A local OpenCode plugin also reads Keychain at request time
@@ -11,6 +10,7 @@ so Desktop does not depend on inheriting the user's shell environment.
 
 from __future__ import annotations
 
+import copy
 import json
 import shutil
 import subprocess
@@ -142,6 +142,103 @@ class OpencodeTarget:
         }
         return {"provider": {provider.provider_name: provider_block}}
 
+    @staticmethod
+    def _provider_maps(data: dict) -> tuple[dict, dict]:
+        if not isinstance(data, dict):
+            raise ValueError("OpenCode configuration must be an object.")
+        legacy = data.get("provider")
+        native = data.get("providers")
+        legacy = {} if legacy is None else legacy
+        native = {} if native is None else native
+        if not isinstance(legacy, dict) or not isinstance(native, dict):
+            raise ValueError("OpenCode provider and providers entries must be objects.")
+        return legacy, native
+
+    @staticmethod
+    def _remove_authorization(data: dict) -> None:
+        headers = data.get("headers")
+        if isinstance(headers, dict):
+            for key in list(headers):
+                if key.lower() == "authorization":
+                    del headers[key]
+
+    def _native_provider(self, legacy: dict, previous: dict) -> dict:
+        native = copy.deepcopy(previous)
+        settings = native.get("settings")
+        if settings is None:
+            settings = {}
+        if not isinstance(settings, dict):
+            raise ValueError("OpenCode V2 provider settings must be an object.")
+        settings.update(legacy["options"])
+        self._remove_authorization(settings)
+        self._remove_authorization(native)
+        provider_compatibility = native.get("compatibility")
+        if isinstance(provider_compatibility, dict):
+            provider_compatibility.pop("reasoningField", None)
+        previous_models = native.get("models") or {}
+        if not isinstance(previous_models, dict):
+            raise ValueError("OpenCode V2 provider models must be an object.")
+        models = {}
+        for name, model in legacy["models"].items():
+            existing = previous_models.get(name) or {}
+            if not isinstance(existing, dict):
+                raise ValueError(f"OpenCode V2 model {name!r} must be an object.")
+            entry = copy.deepcopy(existing)
+            entry.pop("package", None)
+            variants = entry.get("variants")
+            if variants is not None and not isinstance(variants, list):
+                raise ValueError(f"OpenCode V2 model {name!r} variants must be an array.")
+            for override in [entry, *(variants or [])]:
+                if not isinstance(override, dict):
+                    raise ValueError(f"OpenCode V2 model {name!r} has an invalid variant.")
+                options = override.get("settings")
+                if isinstance(options, dict):
+                    options.pop("baseURL", None)
+                    options.pop("apiKey", None)
+                    self._remove_authorization(options)
+                self._remove_authorization(override)
+            capabilities = entry.get("capabilities")
+            if capabilities is None:
+                capabilities = {}
+            if not isinstance(capabilities, dict):
+                raise ValueError(f"OpenCode V2 model {name!r} capabilities must be an object.")
+            inputs = capabilities.get("input")
+            inputs = inputs if isinstance(inputs, list) else []
+            capabilities["input"] = ["text"] + [item for item in inputs if item not in ("text", "image")]
+            if model["attachment"]:
+                capabilities["input"].append("image")
+            capabilities["tools"] = model["tool_call"]
+            capabilities.setdefault("temperature", model["temperature"])
+            reasoning = capabilities.get("reasoning")
+            reasoning = reasoning if isinstance(reasoning, dict) and reasoning.get("supported") is True else {}
+            capabilities["reasoning"] = {**reasoning, "supported": True} if model["reasoning"] else {"supported": False}
+            compatibility = entry.get("compatibility")
+            if compatibility is None:
+                compatibility = {}
+            if not isinstance(compatibility, dict):
+                raise ValueError(f"OpenCode V2 model {name!r} compatibility must be an object.")
+            if model["interleaved"]:
+                compatibility["reasoningField"] = model["interleaved"]["field"]
+            else:
+                compatibility.pop("reasoningField", None)
+            entry.update({
+                "name": model["name"],
+                "modelID": name,
+                "type": "chat",
+                "disabled": False,
+                "limit": sett.merge(entry.get("limit", {}) if isinstance(entry.get("limit"), dict) else {}, model["limit"]),
+                "capabilities": capabilities,
+                "compatibility": compatibility,
+            })
+            models[name] = entry
+        native.update({
+            "name": legacy["name"],
+            "package": "aisdk:@ai-sdk/openai-compatible",
+            "settings": settings,
+            "models": models,
+        })
+        return native
+
     def _configure_keychain_plugin(self, name: str, server: str | None) -> None:
         plugins = self.config_path.parent / "plugins"
         mapping_path = plugins / "byop-keychain.json"
@@ -181,27 +278,17 @@ class OpencodeTarget:
                 + "\n  - ".join(errors)
             )
 
-        if dry_run:
-            fragment = self.build_fragment(
-                provider,
-                use_keychain=use_keychain,
-                use_env=use_env,
-                redact=True,
-            )
-            log("[dry-run] OpenCode would write the following opencode.json fragment:")
-            log(json.dumps(fragment, indent=2))
-            return
-
         existing = self._load()
-        existing_providers = existing.get("provider") or {}
+        legacy, native = self._provider_maps(existing)
+        existing_names = legacy.keys() | native.keys()
         name_to_write = provider.provider_name
-        if provider.provider_name in existing_providers:
+        if provider.provider_name in existing_names:
             if conflict_action == "skip":
                 log(
                     f"Skip: OpenCode already has {provider.provider_name}; "
                     f"leaving {self.config_path} untouched."
                 )
-                if use_keychain or (use_env and not provider.api_key_env):
+                if not dry_run and (use_keychain or (use_env and not provider.api_key_env)):
                     kc.ensure_key(
                         server=provider.keychain_server(),
                         api_key=provider.api_key,
@@ -214,13 +301,32 @@ class OpencodeTarget:
                 return
             if conflict_action == "append":
                 i = 2
-                while f"{provider.provider_name}_{i}" in existing_providers:
+                while f"{provider.provider_name}_{i}" in existing_names:
                     i += 1
                 name_to_write = f"{provider.provider_name}_{i}"
                 log(
                     f"Append: OpenCode already has {provider.provider_name}; "
                     f"writing under {name_to_write}."
                 )
+
+        fragment = self.build_fragment(
+            provider,
+            use_keychain=use_keychain,
+            use_env=use_env,
+            redact=dry_run,
+        )
+        new_block = fragment["provider"].pop(provider.provider_name)
+        fragment["provider"][name_to_write] = new_block
+        if name_to_write in native:
+            if not isinstance(native[name_to_write], dict):
+                raise ValueError(f"OpenCode V2 provider {name_to_write!r} must be an object.")
+            self._native_provider(new_block, native[name_to_write])
+            if dry_run:
+                fragment["providers"] = {name_to_write: self._native_provider(new_block, {})}
+        if dry_run:
+            log("[dry-run] OpenCode would write the following opencode.json fragment:")
+            log(json.dumps(fragment, indent=2))
+            return
 
         if use_keychain or (use_env and not provider.api_key_env):
             kc.ensure_key(
@@ -233,19 +339,18 @@ class OpencodeTarget:
                 keychain_env=use_keychain,
             )
 
-        fragment = self.build_fragment(
-            provider,
-            use_keychain=use_keychain,
-            use_env=use_env,
-        )
-        new_block = fragment["provider"][provider.provider_name]
         self._configure_keychain_plugin(
             name_to_write, provider.keychain_server() if use_keychain else None
         )
 
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         current = self._load()
-        providers = current.setdefault("provider", {})
+        providers, current_native = self._provider_maps(current)
+        current["provider"] = providers
+        if name_to_write in current_native:
+            if not isinstance(current_native[name_to_write], dict):
+                raise ValueError(f"OpenCode V2 provider {name_to_write!r} must be an object.")
+            current_native[name_to_write] = self._native_provider(new_block, current_native[name_to_write])
         previous = providers.get(name_to_write)
         if isinstance(previous, dict):
             previous_models = previous.get("models")
@@ -268,6 +373,27 @@ class OpencodeTarget:
             providers[name_to_write] = merged
         else:
             providers[name_to_write] = new_block
+        if name_to_write in current_native:
+            active = providers[name_to_write]
+            self._remove_authorization(active.get("options", {}))
+            for model_id, model in active["models"].items():
+                if "id" in model:
+                    model["id"] = model_id
+                model.pop("provider", None)
+                overrides = [model]
+                variants = model.get("variants")
+                if isinstance(variants, dict):
+                    overrides.extend(item for item in variants.values() if isinstance(item, dict))
+                for override in overrides:
+                    if override is not model:
+                        override.pop("baseURL", None)
+                        override.pop("apiKey", None)
+                    self._remove_authorization(override)
+                    options = override.get("options")
+                    if isinstance(options, dict):
+                        options.pop("baseURL", None)
+                        options.pop("apiKey", None)
+                        self._remove_authorization(options)
         self._write(current)
         log(f"Updated OpenCode config at {self.config_path}")
         if new_block["options"]["apiKey"].startswith("{env:"):
@@ -298,14 +424,13 @@ class OpencodeTarget:
         )
 
     def current_provider_names(self) -> list[str]:
-        data = self._load()
-        block = data.get("provider", {})
-        return list(block.keys()) if isinstance(block, dict) else []
+        legacy, native = self._provider_maps(self._load())
+        return list(dict.fromkeys([*legacy, *native]))
 
     def export_config(self) -> dict:
-        """Return the byop-managed slice of opencode.json (top-level ``provider``)."""
-        data = self._load()
-        providers = data.get("provider", {})
+        """Return the effective providers from the OpenCode configuration."""
+        legacy, native = self._provider_maps(self._load())
+        providers = {**legacy, **native}
         return {
             self.name: {
                 "config_path": str(self.config_path),
