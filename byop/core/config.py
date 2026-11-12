@@ -35,8 +35,9 @@ KNOWN_REASONING_EFFORTS = {
     "max",
 }
 
-DEFAULT_MAX_TOKENS = 128000
-DEFAULT_MAX_OUTPUT_TOKENS = 32000
+DEFAULT_MAX_TOKENS = 1000000
+DEFAULT_MAX_OUTPUT_TOKENS = 128000
+DEFAULT_REASONING_EFFORT = "medium"
 
 
 @dataclass
@@ -47,7 +48,7 @@ class ModelConfig:
     display_name: str | None = None
     max_tokens: int = DEFAULT_MAX_TOKENS
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
-    reasoning_effort: str | None = None
+    reasoning_effort: str | None = DEFAULT_REASONING_EFFORT
     capabilities: Mapping[str, bool | int | str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:

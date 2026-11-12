@@ -50,6 +50,8 @@ Applying to named OMP profiles overlays global `config.yml`/`config.yaml` settin
 
 Use `byop profile edit` to change the active provider without re-entering other fields. Model details include the context window, maximum output, reasoning effort, and capabilities. After editing, run `byop apply` to update tools. The first model is the default where a tool accepts only one.
 
+New models default to `medium` reasoning effort, a **1,000,000-token context window**, and **128,000 output tokens**. Supported efforts include `low`, `medium`, `high`, `xhigh`, and `max`. Explicit overrides and existing saved model settings are preserved.
+
 You can enter comma-separated model IDs or paste JSON at the first provider prompt. Omit `api_key` to enter it privately:
 
 ```json

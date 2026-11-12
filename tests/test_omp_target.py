@@ -271,8 +271,8 @@ def test_omp_preserves_typed_looking_strings_on_reapply(tmp_path):
 ])
 def test_pi_and_omp_isolate_mixed_model_token_fields(tmp_path, target_type, filename):
     target = target_type(tmp_path / filename)
-    legacy = ModelConfig(name="legacy", capabilities={"max_tokens_parameter": True})
-    modern = ModelConfig(name="modern", capabilities={"max_tokens_parameter": True})
+    legacy = ModelConfig(name="legacy", reasoning_effort=None, capabilities={"max_tokens_parameter": True})
+    modern = ModelConfig(name="modern", reasoning_effort=None, capabilities={"max_tokens_parameter": True})
     provider = _provider(api_key_env="CUSTOM_KEY", models=[legacy, modern])
     target.configure(provider, use_keychain=False, use_env=True, log=lambda _: None)
     previous = target._load()
@@ -281,7 +281,7 @@ def test_pi_and_omp_isolate_mixed_model_token_fields(tmp_path, target_type, file
     block["models"][1]["compat"]["supportsStore"] = False
     target._write(previous)
 
-    provider.models[1] = ModelConfig(name="modern", capabilities={"max_tokens_parameter": False})
+    provider.models[1] = ModelConfig(name="modern", reasoning_effort=None, capabilities={"max_tokens_parameter": False})
     for _ in range(2):
         target.configure(provider, use_keychain=False, use_env=True, log=lambda _: None)
         block = target._load()["providers"]["Cosmaxis"]
@@ -300,7 +300,8 @@ def test_omp_adds_provider_after_file_without_final_newline(tmp_path, indent):
     target = OmpTarget(path)
     with mock.patch("byop.core.targets.py.kc.ensure_key"), \
          mock.patch("byop.core.targets.py.kc.keychain_has", return_value=True):
-        target.configure(_provider(), log=lambda _: None)
+        provider = _provider(models=[ModelConfig(name="hy3", max_tokens=128000, max_output_tokens=32000)])
+        target.configure(provider, log=lambda _: None)
     providers = target._load()["providers"]
     assert set(providers) == {"Other", "Cosmaxis"}
     assert providers["Cosmaxis"]["models"][0]["contextWindow"] == 128000

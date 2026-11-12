@@ -159,7 +159,9 @@ def test_codex_build_fragment_includes_reasoning_and_catalog(tmp_path):
 def test_codex_single_model_preserves_explicit_reasoning_off(tmp_path, effort, expected):
     path = tmp_path / "config.toml"
     path.write_text('model_reasoning_effort = "high"\n')
-    provider = _provider(models=[ModelConfig(name="plain", reasoning_effort=effort)])
+    provider = _provider(models=[ModelConfig(
+        name="plain", max_tokens=128000, max_output_tokens=32000, reasoning_effort=effort,
+    )])
     with mock.patch("byop.core.targets.codex.kc.ensure_key"):
         CodexTarget(path).configure(provider, use_keychain=False, use_env=True, log=lambda _: None)
     assert tomllib.loads(path.read_text()).get("model_reasoning_effort") == expected
@@ -170,7 +172,7 @@ def test_codex_single_model_preserves_explicit_reasoning_off(tmp_path, effort, e
 def test_codex_single_and_multiple_models_have_distinct_contexts(tmp_path):
     target = CodexTarget(tmp_path / "config.toml")
     single = _provider(models=[
-        ModelConfig(name="solo", max_tokens=64000, max_output_tokens=4096)
+        ModelConfig(name="solo", max_tokens=64000, max_output_tokens=4096, reasoning_effort=None)
     ])
     assert target.build_fragment(single)["model_context_window"] == 64000
     with mock.patch("byop.core.targets.codex.kc.ensure_key"):
@@ -339,7 +341,7 @@ def test_codex_reverts_catalog_when_config_write_fails(tmp_path):
 def test_codex_switch_to_plain_model_clears_managed_reasoning(tmp_path):
     cfg = tmp_path / "config.toml"
     target = CodexTarget(cfg)
-    plain = _provider(models=[ModelConfig(name="plain")])
+    plain = _provider(models=[ModelConfig(name="plain", reasoning_effort=None)])
     with mock.patch("byop.core.targets.codex.kc.ensure_key"):
         target.configure(_provider(), use_keychain=False, use_env=True, log=lambda _: None)
         target.configure(plain, use_keychain=False, use_env=True, log=lambda _: None)

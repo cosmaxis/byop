@@ -29,8 +29,9 @@ def test_model_to_dict_defaults():
     m = ModelConfig(name="hy3")
     d = m.to_dict()
     assert d["name"] == "hy3"
-    assert d["max_tokens"] == 128000
-    assert d["max_output_tokens"] == 32000
+    assert d["max_tokens"] == 1000000
+    assert d["max_output_tokens"] == 128000
+    assert d["reasoning_effort"] == "medium"
     assert "capabilities" not in d
 
 

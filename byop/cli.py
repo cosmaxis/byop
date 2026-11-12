@@ -25,7 +25,13 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 from .core import default_model_capabilities, prompt, wizard
-from .core.config import ModelConfig, ProviderConfig
+from .core.config import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_REASONING_EFFORT,
+    ModelConfig,
+    ProviderConfig,
+)
 from .core.conflict import resolve_conflict_action, supports_append
 from .core.paste import parse_provider_paste
 
@@ -224,9 +230,10 @@ def _add_apply_args(p: argparse.ArgumentParser) -> None:
     g.add_argument(
         "--reasoning-effort",
         choices=["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        default=DEFAULT_REASONING_EFFORT,
     )
-    g.add_argument("--max-tokens", type=int, default=128000)
-    g.add_argument("--max-output-tokens", type=int, default=32000)
+    g.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    g.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS)
     g.add_argument("--images", action="store_true")
     g.add_argument("--interleaved-reasoning", action="store_true")
     g.add_argument("--max-tokens-parameter", action="store_true")
@@ -517,9 +524,9 @@ def _make_args_for_apply(profile, api_key, prefs):
         model=[m.name for m in profile.models],
         model_name=None,
         model_display=primary.display_name if primary else None,
-        reasoning_effort=primary.reasoning_effort if primary else None,
-        max_tokens=primary.max_tokens if primary else 128000,
-        max_output_tokens=primary.max_output_tokens if primary else 32000,
+        reasoning_effort=primary.reasoning_effort if primary else DEFAULT_REASONING_EFFORT,
+        max_tokens=primary.max_tokens if primary else DEFAULT_MAX_TOKENS,
+        max_output_tokens=primary.max_output_tokens if primary else DEFAULT_MAX_OUTPUT_TOKENS,
         images=bool(primary and primary.capabilities.get("images")),
         interleaved_reasoning=bool(
             primary and primary.capabilities.get("interleaved_reasoning")

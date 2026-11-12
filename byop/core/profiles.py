@@ -182,6 +182,7 @@ def _model_to_toml(model: ModelConfig) -> dict[str, Any]:
 
 
 def _model_from_toml(data: dict[str, Any]) -> ModelConfig:
+    # Missing saved-profile fields retain legacy defaults, not new-model defaults.
     return ModelConfig(
         name=str(data.get("id") or data.get("name") or ""),
         display_name=data.get("name") if "name" in data and data.get("id") else None,
