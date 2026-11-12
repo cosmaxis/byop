@@ -41,6 +41,78 @@ def test_secret_prompt_shows_only_safe_fragments(monkeypatch, capsys):
     assert prompt.mask_secret("sk-1234\x1b[31msecret") == "****"
 
 
+def test_pty_secret_live_mask_editing_cancel_and_terminal_restore():
+    import hashlib
+    import os
+    import pty
+    import select
+    import subprocess
+    import time
+
+    key = "sk-1b82middle9cc8"
+    master, slave = pty.openpty()
+    env = {**os.environ, "TERM": "xterm"}
+    env.pop("BYOP_PLAIN", None)
+    env.pop("NO_COLOR", None)
+    child = subprocess.Popen(
+        [
+            sys.executable, "-c",
+            "import hashlib, sys, termios\n"
+            "from byop.core.prompt import ask_secret\n"
+            "before = termios.tcgetattr(sys.stdin)\n"
+            "key = ask_secret('API key')\n"
+            "print('VALUE=' + hashlib.sha256(key.encode()).hexdigest())\n"
+            "try:\n"
+            "    ask_secret('Again')\n"
+            "except KeyboardInterrupt:\n"
+            "    print('CANCELLED')\n"
+            "after = termios.tcgetattr(sys.stdin)\n"
+            "# PENDIN is kernel input-reprocessing state, not a terminal option.\n"
+            "before[3] &= ~termios.PENDIN\n"
+            "after[3] &= ~termios.PENDIN\n"
+            "print('RESTORED=' + str(after == before))\n",
+        ],
+        stdin=slave, stdout=slave, stderr=slave, env=env,
+    )
+    output = b""
+    try:
+        deadline = time.monotonic() + 10
+        while b"API key" not in output and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.1)[0]:
+                output += os.read(master, 4096)
+        assert b"API key" in output
+        os.write(master, b"discard\x15oops \x17sk-1b82X\x7f\x1b[200~middle9cc8\x1b[201~")
+        while b"********" not in output and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.1)[0]:
+                output += os.read(master, 4096)
+        assert b"********" in output
+        assert child.poll() is None
+        assert key.encode() not in output
+        os.write(master, b"\r")
+        while b"Again" not in output and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.1)[0]:
+                output += os.read(master, 4096)
+        assert b"Again" in output
+        os.write(master, b"\x03")
+        while child.poll() is None and time.monotonic() < deadline:
+            if select.select([master], [], [], 0.1)[0]:
+                output += os.read(master, 4096)
+        child.wait(timeout=1)
+        while select.select([master], [], [], 0)[0]:
+            output += os.read(master, 4096)
+        assert child.returncode == 0
+        assert b"CANCELLED" in output
+        assert ("VALUE=" + hashlib.sha256(key.encode()).hexdigest()).encode() in output
+        assert key.encode() not in output
+        assert b"RESTORED=True" in output
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+        os.close(master)
+        os.close(slave)
+
+
 def test_arrow_menu_selects_option_and_restores_terminal():
     import os
     import pty
