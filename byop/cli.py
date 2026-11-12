@@ -143,7 +143,10 @@ def _omp_target_kwargs(
             p.name for p in directory.iterdir()
             if p.is_dir() and not p.is_symlink() and p.name == p.name.strip()
         ) if directory.is_dir() else []
-        return {"omp_profiles": ["default", *(name for name in names if name != "default")]}
+        return {
+            "omp_profiles": ["default", *(name for name in names if name != "default")],
+            "omp_root": omp_config_root(),
+        }
     return {"omp_models_path": models_path} if models_path is not None else {}
 
 def _add_apply_args(p: argparse.ArgumentParser) -> None:

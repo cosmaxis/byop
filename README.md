@@ -44,7 +44,7 @@ Limits are supplied by you, not discovered from the gateway. Claude can ignore c
 
 Oh My Pi uses the active `OMP_PROFILE` or `PI_PROFILE`. Repeat `--profile NAME` to select multiple profiles, or use `--all-profiles` for the global root and every discovered profile. These options also work with `status`, `doctor`, and `export-config`; multi-profile exports use an `omp_profiles` object. `--omp-models-path PATH` overrides a single profile selection and changes only that model file.
 
-Applying to named OMP profiles overlays global `config.yml`/`config.yaml` settings and `mcp.json` servers. Matching global values replace profile values; profile-only settings and servers remain. Copied config files are owner-only. Review `--dry-run` first. After MCP changes, restart OMP or run `/mcp reload`; an existing process does not automatically adopt the new configuration.
+Applying to named OMP profiles overlays global `config.yml`/`config.yaml` settings and `mcp.json` servers. Matching global values replace profile values; profile-only settings and servers remain. YAML comments and block/flow mappings are preserved. Copied config files are owner-only. Review `--dry-run` first. After MCP changes, restart OMP or run `/mcp reload`; an existing process does not automatically adopt the new configuration.
 
 ## Providers and models
 

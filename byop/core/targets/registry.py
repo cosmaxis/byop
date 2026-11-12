@@ -11,7 +11,7 @@ from pathlib import Path
 from .base import Target
 from .claude import ClaudeTarget
 from .codex import CodexTarget
-from .omp import OmpTarget, omp_config_root
+from .omp import OmpTarget
 from .opencode import OpencodeTarget
 from .py import PyTarget
 from .warp import WarpTarget
@@ -33,6 +33,7 @@ def available_targets(
     settings_path: Path | None = None,
     *,
     omp_profiles: Sequence[str] | None = None,
+    omp_root: Path | None = None,
     omp_models_path: Path | None = None,
     claude_permission_mode: str | None = None,
     claude_auto_mode_model: str | None = None,
@@ -44,9 +45,9 @@ def available_targets(
             targets.append(cls(settings_path=settings_path))
         elif cls is OmpTarget:
             if omp_profiles is not None:
-                targets.extend(cls(profile=profile, config_root=omp_config_root()) for profile in omp_profiles)
+                targets.extend(cls(profile=profile, config_root=omp_root) for profile in omp_profiles)
             else:
-                targets.append(cls(models_path=omp_models_path))
+                targets.append(cls(models_path=omp_models_path, config_root=omp_root))
         elif cls is ClaudeTarget:
             targets.append(cls(
                 permission_mode=claude_permission_mode,

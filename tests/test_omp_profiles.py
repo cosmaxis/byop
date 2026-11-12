@@ -179,3 +179,47 @@ def test_explicit_model_path_does_not_sync_inherited_or_explicit_profile(home, m
     assert not (root / "profiles").exists()
     assert not (custom.parent / "config.yml").exists()
     assert not (custom.parent / "mcp.json").exists()
+
+
+@pytest.mark.parametrize("flow_source", [False, True])
+def test_settings_overlay_preserves_flow_mapping_leaves_and_comments(home, flow_source):
+    from ruamel.yaml import YAML
+
+    root = _source(home)
+    source = "editor: {tabSize: 2}\n" if flow_source else "editor:\n  tabSize: 2\n"
+    local = "editor:\n  tabSize: 4\n  localOption: keep\n" if flow_source else "editor: {tabSize: 4, localOption: keep}\n"
+    (root / "agent" / "config.yml").write_text(source)
+    target = OmpTarget(profile="one", config_root=root)
+    target.agent_dir.mkdir(parents=True)
+    target.settings_path.write_text("# preserve this comment\n" + local)
+    target.configure(_provider(), use_keychain=False)
+    text = target.settings_path.read_text()
+    assert YAML(typ="rt").load(text)["editor"] == {"tabSize": 2, "localOption": "keep"}
+    assert "# preserve this comment" in text
+    target.configure(_provider(), use_keychain=False)
+    assert target.settings_path.read_text() == text
+
+
+def test_conflict_skip_preserves_profile_settings_and_mcp(home):
+    root = _source(home)
+    target = OmpTarget(profile="one", config_root=root)
+    target.configure(_provider(), use_keychain=False)
+    before = {path: path.read_bytes() for path in target.agent_dir.iterdir()}
+    (root / "agent" / "config.yml").write_text("theme: {dark: false}\n")
+    (root / "agent" / "mcp.json").write_text('{"mcpServers":{"shared":{"command":"changed"}}}')
+    target.configure(_provider(), use_keychain=False, conflict_action="skip")
+    assert {path: path.read_bytes() for path in target.agent_dir.iterdir()} == before
+
+
+def test_explicit_default_profile_writes_to_native_agent_override(home, monkeypatch):
+    root = _source(home)
+    override = home / "override"
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(override))
+    monkeypatch.setattr("byop.core.targets.py.kc.ensure_key", lambda **kwargs: None)
+    assert cli.main([
+        "apply", "--target", "omp", "--profile", "default", "--provider", "Demo",
+        "--api-url", "https://example.test/v1", "--api-key", "not-a-real-secret",
+        "--model", "model", "--no-keychain", "--skip-install",
+    ]) == 0
+    assert (override / "models.yml").exists()
+    assert not (root / "agent" / "models.yml").exists()

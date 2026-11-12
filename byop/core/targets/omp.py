@@ -14,8 +14,13 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
+from io import StringIO
 from pathlib import Path
+
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
+from ruamel.yaml.error import YAMLError
 
 from ..config import ProviderConfig
 from .py import PyTarget
@@ -43,75 +48,42 @@ def _settings_path(agent_dir: Path) -> Path:
     )
 
 
-def _settings_sections(text: str, path: Path) -> dict[str, str]:
-    """Split native YAML at top-level keys without rewriting user-owned sections."""
-    sections: dict[str, str] = {}
-    key = None
-    lines: list[str] = []
-    for line in text.splitlines(keepends=True):
-        if not line.strip() or line.lstrip().startswith("#"):
-            lines.append(line)
-            continue
-        match = re.fullmatch(r"([A-Za-z][\w-]*):(?:\s.*)?", line.rstrip("\r\n"))
-        if match:
-            if key is not None:
-                sections[key] = "".join(lines)
-            lines = (lines if key is None else []) + [line]
-            key = match.group(1)
-            if key in sections:
-                raise ValueError(f"Duplicate top-level setting in {path}")
-        elif key is None or not line[0].isspace():
-            raise ValueError(f"Unsupported OMP settings layout in {path}; edit it manually.")
-        else:
-            lines.append(line)
-    if key is not None:
-        sections[key] = "".join(lines)
-    return sections
-
-
-def _settings_children(section: str) -> tuple[str, str, int] | None:
-    lines = section.splitlines(keepends=True)
-    index = next(i for i, line in enumerate(lines) if line.strip() and not line.lstrip().startswith("#"))
-    if not re.fullmatch(r"[A-Za-z][\w-]*:\s*(?:#.*)?", lines[index].rstrip("\r\n")):
-        return None
-    body = lines[index + 1:]
-    first = next((line for line in body if line.strip() and not line.lstrip().startswith("#")), "")
-    if not first or first.lstrip().startswith("-"):
-        return None
-    indent = len(first) - len(first.lstrip())
-    if not indent:
-        return None
-    children = "".join(line[indent:] if line.startswith(" " * indent) else line for line in body)
-    return "".join(lines[:index + 1]), children, indent
-
-
 def _merge_settings(source_text: str, destination_text: str, path: Path) -> str:
-    """Overlay source leaves while retaining destination-only YAML and comments."""
-    source = _settings_sections(source_text, path)
-    destination = _settings_sections(destination_text, path)
-    if not source:
+    """Overlay source leaves without losing profile-only values or YAML comments."""
+    yaml = YAML(typ="rt")
+    yaml.preserve_quotes = True
+    try:
+        source = yaml.load(source_text)
+        destination = yaml.load(destination_text)
+    except YAMLError:
+        raise ValueError(f"Could not parse OMP settings for {path}; check global and profile YAML.") from None
+    prefix = destination_text if destination is None else ""
+    source = CommentedMap() if source is None else source
+    destination = CommentedMap() if destination is None else destination
+    if not isinstance(source, MutableMapping) or not isinstance(destination, MutableMapping):
+        raise ValueError(f"OMP settings for {path} must be YAML mappings.")
+    seen: set[tuple[int, int]] = set()
+
+    def overlay(incoming: MutableMapping, current: MutableMapping) -> bool:
+        pair = id(incoming), id(current)
+        if pair in seen:
+            return False
+        seen.add(pair)
+        changed = False
+        for key, value in incoming.items():
+            if key in current and isinstance(value, MutableMapping) and isinstance(current[key], MutableMapping):
+                changed = overlay(value, current[key]) or changed
+            elif key not in current or current[key] != value or isinstance(current[key], bool) != isinstance(value, bool):
+                current[key] = value
+                changed = True
+        return changed
+
+    if not overlay(source, destination):
         return destination_text
-    if not destination:
-        separator = "\n" if destination_text and not destination_text.endswith("\n") else ""
-        return destination_text + separator + source_text
-    for key, section in source.items():
-        source_children = _settings_children(section)
-        destination_children = _settings_children(destination[key]) if key in destination else None
-        if source_children and destination_children:
-            prefix, body, indent = destination_children
-            merged = _merge_settings(source_children[1], body, path)
-            destination[key] = prefix + "".join(
-                " " * indent + line if line.strip() else line
-                for line in merged.splitlines(keepends=True)
-            )
-        else:
-            destination[key] = section
-    result = ""
-    for section in destination.values():
-        if result and not result.endswith("\n"):
-            result += "\n"
-        result += section
-    return result
+    output = StringIO()
+    yaml.dump(destination, output)
+    separator = "\n" if prefix and not prefix.endswith("\n") else ""
+    return prefix + separator + output.getvalue()
 
 
 def _read_mcp(path: Path) -> dict:
@@ -517,7 +489,8 @@ class OmpTarget(PyTarget):
         log: Callable[[str], None] = print,
     ) -> None:
         try:
-            changes = self._profile_file_changes()
+            skipped = conflict_action == "skip" and provider.provider_name in self.current_provider_names()
+            changes = {} if skipped else self._profile_file_changes()
         except OSError as exc:
             raise RuntimeError(f"Could not read OMP profile configuration: {exc}") from exc
         super().configure(
