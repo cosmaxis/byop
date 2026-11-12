@@ -247,14 +247,14 @@ def _summarize_answer(val: str, *, allow_paste: bool) -> str:
     return val
 
 
-def _read_paste_safe_tty(prefix: str) -> str:
+def _read_paste_safe_tty(prefix: str, *, secret: bool = False) -> str:
     """Read a line or pasted JSON object from a TTY without echoing pasted secrets."""
     import termios
 
     fd = sys.stdin.fileno()
     previous = termios.tcgetattr(fd)
     attrs = termios.tcgetattr(fd)
-    attrs[3] &= ~(termios.ICANON | termios.ECHO)
+    attrs[3] &= ~(termios.ICANON | termios.ECHO | (termios.ISIG if secret else 0))
     attrs[6][termios.VMIN] = 1
     attrs[6][termios.VTIME] = 0
 
@@ -262,6 +262,17 @@ def _read_paste_safe_tty(prefix: str) -> str:
     chars: list[str] = []
     pasting_json = False
     hidden_badge = _style("[JSON paste · hidden]", _DIM)
+    mask_width = 0
+
+    def update_mask() -> None:
+        nonlocal mask_width
+        width = min(len(chars), 8)
+        if width > mask_width:
+            sys.stdout.write("*" * (width - mask_width))
+        elif width < mask_width:
+            sys.stdout.write("\b \b" * (mask_width - width))
+        mask_width = width
+        sys.stdout.flush()
 
     def _read_char_buf(data: bytes) -> str:
         return decoder.decode(data, final=False)
@@ -313,7 +324,9 @@ def _read_paste_safe_tty(prefix: str) -> str:
                 if b in (b"\x7f", b"\x08"):
                     if chars:
                         chars.pop()
-                        if not pasting_json:
+                        if secret:
+                            update_mask()
+                        elif not pasting_json:
                             sys.stdout.write("\b \b")
                             sys.stdout.flush()
                         elif not "".join(chars).strip():
@@ -324,8 +337,16 @@ def _read_paste_safe_tty(prefix: str) -> str:
                 if b == b"\x15":
                     chars.clear()
                     pasting_json = False
+                    mask_width = 0
                     sys.stdout.write(f"\r\033[2K{prefix}")
                     sys.stdout.flush()
+                    continue
+                if secret and b == b"\x17":
+                    while chars and chars[-1].isspace():
+                        chars.pop()
+                    while chars and not chars[-1].isspace():
+                        chars.pop()
+                    update_mask()
                     continue
                 if b in (b"\r", b"\n"):
                     if not pasting_json:
@@ -345,10 +366,12 @@ def _read_paste_safe_tty(prefix: str) -> str:
                     continue
 
                 decoded = _read_char_buf(b)
-                if not decoded:
+                if not decoded or (secret and not decoded.isprintable()):
                     continue
                 chars.append(decoded)
-                if not pasting_json and "".join(chars).lstrip().startswith("{"):
+                if secret:
+                    update_mask()
+                elif not pasting_json and "".join(chars).lstrip().startswith("{"):
                     pasting_json = True
                     if len(chars) == 1:
                         sys.stdout.write(hidden_badge)
@@ -430,7 +453,11 @@ def ask_secret(prompt: str, *, hint: str = "", allow_empty: bool = False) -> str
         else:
             suffix = f" ({hint})" if hint else ""
             prefix = f"› {prompt}{suffix}: "
-        val = _strip_escape_chars(getpass.getpass(prefix)).strip()
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            raw = _read_paste_safe_tty(prefix, secret=True)
+        else:
+            raw = getpass.getpass(prefix)
+        val = _strip_escape_chars(raw).strip()
         if val or allow_empty:
             shown = mask_secret(val) if val else "kept existing"
             if _is_tty() and _use_ansi():

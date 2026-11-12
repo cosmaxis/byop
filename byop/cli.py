@@ -400,7 +400,7 @@ def _run_default_landing() -> int:
                 continue
             profile = prof.load_profile(active_name)
             prompt.info(f"Test endpoint · {profile.api_url.rstrip('/')}/models")
-            if prompt.confirm("Send the API key to this endpoint?", default=False):
+            if prompt.confirm("Send the API key to this endpoint?", default=True):
                 from .core.connection import check_api_key
 
                 try:
@@ -872,11 +872,9 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
         return 0 if success else 1
 
     if configured_warp:
-        prompt.warn(
-            "Warp: Cmd-Q and reopen to reload cached API keys (select custom model, not Auto)"
-        )
+        prompt.info("Warp: save work; Cmd-Q and reopen; choose the custom model, not Auto")
     if use_env or exported_shell_env:
-        prompt.warn("Shell profile updated · run `source ~/.zshrc` or open a new terminal")
+        prompt.info("Reload shell: `source ~/.zshrc` or open a new terminal")
 
     if success:
         if configured_count:
@@ -1070,7 +1068,7 @@ def _profile_edit_interactive() -> int:
     if write_env:
         kc.write_env_to_profile(new_env, key)
         os.environ[new_env] = key
-        prompt.warn("Shell profile updated · run `source ~/.zshrc` or open a new terminal")
+        prompt.info("Reload shell: `source ~/.zshrc` or open a new terminal")
     prof.save_profile(updated, allow_overwrite=new_name == name)
     if new_name != name:
         prof.set_active_profile_name(new_name)

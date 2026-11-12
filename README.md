@@ -21,10 +21,10 @@ byop
 1. Choose **Add provider** and enter your provider name, API URL, key, and model IDs.
 2. Choose **Set up tools** and select the tools to configure. Byop asks before installing missing tools.
 3. To change a field later, choose **Edit provider**. Select **Models** to add or edit models, choose the default, or remove models; choose **Save** when finished.
-4. Choose **Test API key** to send the key to the provider's `/models` endpoint. The result appears above the action menu.
+4. Choose **Test API key** to send the key to the provider's `/models` endpoint. Confirmation defaults to Yes; choose No to keep the key local. The result appears above the action menu.
 
 Use ↑/↓ and Enter to navigate; Space selects tools. Escape cancels cursor menus, and Ctrl-C cancels setup. Set `BYOP_PLAIN=1` for line-based menus.
-Keys are hidden while entered, then shown as a partial mask (for example, `sk-1b82****9cc8`). Short keys remain fully masked. Anyone viewing the terminal can see the unmasked fragments.
+Keys show masked feedback while entered, then a partial mask (for example, `sk-1b82****9cc8`). Short keys remain fully masked. Anyone viewing the terminal can see the unmasked fragments.
 
 The optional key check uses an OpenAI-compatible models request and does not run inference. An accepted request does not prove authentication is required or that a model or tool works; unsupported endpoints, network failures, and permissions can make the result inconclusive. Byop asks before sending the key, does not follow redirects, and permits HTTP only for loopback endpoints.
 
