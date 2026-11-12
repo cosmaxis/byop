@@ -14,7 +14,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .config import DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TOKENS, ModelConfig, ProviderConfig
+from .config import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_REASONING_EFFORT,
+    ModelConfig,
+    ProviderConfig,
+)
 
 
 def _strip_jsonc_comments(text: str) -> str:
@@ -98,7 +104,7 @@ def _coerce_model(raw: dict[str, Any]) -> ModelConfig:
         raw.get("max_tokens_out", raw.get("maxTokens", limits.get("output", output_default))),
     )
     display = raw.get("display_name") or (raw.get("name") if raw.get("id") else None)
-    reasoning = raw.get("reasoning_effort")
+    reasoning = raw.get("reasoning_effort", DEFAULT_REASONING_EFFORT)
     caps_raw = raw.get("capabilities")
     capabilities: dict[str, Any] = dict(caps_raw) if isinstance(caps_raw, dict) else {}
     if isinstance(raw.get("input"), list):

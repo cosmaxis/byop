@@ -43,6 +43,9 @@ def test_run_wizard_builds_provider_and_prefs():
     assert provider.normalized_api_url() == "https://api.example.com/v1"
     assert provider.api_key == "sk-test123"
     assert [m.name for m in provider.models] == ["my-model"]
+    assert provider.models[0].max_tokens == 1000000
+    assert provider.models[0].max_output_tokens == 128000
+    assert provider.models[0].reasoning_effort == "medium"
     assert provider.set_default_agent is True
     assert provider.set_inline_assistant is True
     assert provider.set_commit_message is False
@@ -116,6 +119,8 @@ def test_run_wizard_accepts_full_paste_on_first_prompt():
     assert provider.api_url == "https://api.example.com/v1"
     assert provider.api_key == "sk-12345678"
     assert [m.name for m in provider.models] == ["hy3"]
+    assert (provider.models[0].max_tokens, provider.models[0].max_output_tokens) == (1000000, 128000)
+    assert provider.models[0].reasoning_effort == "medium"
     assert prefs == {"use_keychain": True, "use_env": False}
 
 
@@ -143,7 +148,8 @@ def test_run_wizard_saved_prefill_empty_enter_keeps_stored_key_and_model_metadat
         provider_name="Cosmaxis",
         api_url="https://api.example.com/v1",
         api_key="sk-stored-keychain",
-        models=[ModelConfig(name="hy3", max_tokens=200000)],
+        models=[ModelConfig(name="hy3", max_tokens=200000, max_output_tokens=32000,
+                            reasoning_effort=None)],
         set_commit_message=True,
         use_edit_predictions=True,
     )
@@ -157,6 +163,8 @@ def test_run_wizard_saved_prefill_empty_enter_keeps_stored_key_and_model_metadat
         provider, _ = wizard.run_wizard(prefill=prefill)
     assert provider.api_key == "sk-stored-keychain"
     assert provider.models[0].max_tokens == 200000
+    assert provider.models[0].max_output_tokens == 32000
+    assert provider.models[0].reasoning_effort is None
     assert provider.set_commit_message is True
     assert provider.use_edit_predictions is True
 
