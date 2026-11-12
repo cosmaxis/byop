@@ -453,7 +453,7 @@ def ask_secret(prompt: str, *, hint: str = "", allow_empty: bool = False) -> str
         else:
             suffix = f" ({hint})" if hint else ""
             prefix = f"› {prompt}{suffix}: "
-        if sys.stdin.isatty() and sys.stdout.isatty():
+        if _is_tty():
             raw = _read_paste_safe_tty(prefix, secret=True)
         else:
             raw = getpass.getpass(prefix)

@@ -24,7 +24,7 @@ byop
 4. Choose **Test API key** to send the key to the provider's `/models` endpoint. Confirmation defaults to Yes; choose No to keep the key local. The result appears above the action menu.
 
 Use ↑/↓ and Enter to navigate; Space selects tools. Escape cancels cursor menus, and Ctrl-C cancels setup. Set `BYOP_PLAIN=1` for line-based menus.
-Keys show masked feedback while entered, then a partial mask (for example, `sk-1b82****9cc8`). Short keys remain fully masked. Anyone viewing the terminal can see the unmasked fragments.
+Keys show masked feedback while entered (hidden in plain mode), then a partial mask (for example, `sk-1b82****9cc8`). Short keys remain fully masked. Anyone viewing the terminal can see the unmasked fragments.
 
 The optional key check uses an OpenAI-compatible models request and does not run inference. An accepted request does not prove authentication is required or that a model or tool works; unsupported endpoints, network failures, and permissions can make the result inconclusive. Byop asks before sending the key, does not follow redirects, and permits HTTP only for loopback endpoints.
 
