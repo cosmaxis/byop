@@ -14,13 +14,14 @@ import os
 import re
 import shutil
 import subprocess
+import warnings
 from collections.abc import Callable, MutableMapping
 from io import StringIO
 from pathlib import Path
 
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
-from ruamel.yaml.error import YAMLError
+from ruamel.yaml.error import YAMLError, YAMLWarning
 
 from ..config import ProviderConfig
 from .py import PyTarget
@@ -53,37 +54,44 @@ def _merge_settings(source_text: str, destination_text: str, path: Path) -> str:
     yaml = YAML(typ="rt")
     yaml.preserve_quotes = True
     try:
-        source = yaml.load(source_text)
-        destination = yaml.load(destination_text)
-    except YAMLError:
-        raise ValueError(f"Could not parse OMP settings for {path}; check global and profile YAML.") from None
-    prefix = destination_text if destination is None else ""
-    source = CommentedMap() if source is None else source
-    destination = CommentedMap() if destination is None else destination
-    if not isinstance(source, MutableMapping) or not isinstance(destination, MutableMapping):
-        raise ValueError(f"OMP settings for {path} must be YAML mappings.")
-    seen: set[tuple[int, int]] = set()
+        with warnings.catch_warnings(action="error", category=YAMLWarning):
+            source = yaml.load(source_text)
+            destination = yaml.load(destination_text)
+            prefix = ""
+            if destination is None:
+                prefix = "".join(
+                    line[line.index("#"):] if "#" in line else line
+                    for line in destination_text.splitlines(keepends=True)
+                    if "#" in line or not line.strip()
+                )
+            source = CommentedMap() if source is None else source
+            destination = CommentedMap() if destination is None else destination
+            if not isinstance(source, MutableMapping) or not isinstance(destination, MutableMapping):
+                raise ValueError(f"OMP settings for {path} must be YAML mappings.")
+            seen: set[tuple[int, int]] = set()
 
-    def overlay(incoming: MutableMapping, current: MutableMapping) -> bool:
-        pair = id(incoming), id(current)
-        if pair in seen:
-            return False
-        seen.add(pair)
-        changed = False
-        for key, value in incoming.items():
-            if key in current and isinstance(value, MutableMapping) and isinstance(current[key], MutableMapping):
-                changed = overlay(value, current[key]) or changed
-            elif key not in current or current[key] != value or isinstance(current[key], bool) != isinstance(value, bool):
-                current[key] = value
-                changed = True
-        return changed
+            def overlay(incoming: MutableMapping, current: MutableMapping) -> bool:
+                pair = id(incoming), id(current)
+                if pair in seen:
+                    return False
+                seen.add(pair)
+                changed = False
+                for key, value in incoming.items():
+                    if key in current and isinstance(value, MutableMapping) and isinstance(current[key], MutableMapping):
+                        changed = overlay(value, current[key]) or changed
+                    elif key not in current or current[key] != value or isinstance(current[key], bool) != isinstance(value, bool):
+                        current[key] = value
+                        changed = True
+                return changed
 
-    if not overlay(source, destination):
-        return destination_text
-    output = StringIO()
-    yaml.dump(destination, output)
-    separator = "\n" if prefix and not prefix.endswith("\n") else ""
-    return prefix + separator + output.getvalue()
+            if not overlay(source, destination):
+                return destination_text
+            output = StringIO()
+            yaml.dump(destination, output)
+            separator = "\n" if prefix and not prefix.endswith("\n") else ""
+            return prefix + separator + output.getvalue()
+    except (YAMLError, YAMLWarning):
+        raise ValueError(f"Could not merge OMP settings for {path}; check global and profile YAML.") from None
 
 
 def _read_mcp(path: Path) -> dict:

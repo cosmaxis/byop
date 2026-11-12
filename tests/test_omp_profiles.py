@@ -223,3 +223,42 @@ def test_explicit_default_profile_writes_to_native_agent_override(home, monkeypa
     ]) == 0
     assert (override / "models.yml").exists()
     assert not (root / "agent" / "models.yml").exists()
+
+
+@pytest.mark.parametrize("document", [
+    "null\n", "~\n", "---\n...\n", "# keep\nnull # inline\n...\n",
+])
+def test_null_profile_settings_become_one_valid_mapping(home, document):
+    from ruamel.yaml import YAML
+
+    root = _source(home)
+    target = OmpTarget(profile="one", config_root=root)
+    target.agent_dir.mkdir(parents=True)
+    target.settings_path.write_text(document)
+    target.configure(_provider(), use_keychain=False)
+    text = target.settings_path.read_text()
+    assert YAML(typ="rt").load(text) == {"theme": {"dark": True}, "editor": {"tabSize": 2}}
+    if "# keep" in document:
+        assert "# keep" in text and "# inline" in text
+    target.configure(_provider(), use_keychain=False)
+    assert target.settings_path.read_text() == text
+
+
+def test_yaml_warnings_never_expose_settings_credentials(home, capsys):
+    root = _source(home)
+    secrets = ("fake-embedding-secret", "fake-llm-secret")
+    (root / "agent" / "config.yml").write_text(
+        f"mnemopi:\n  embeddingApiKey: &key {secrets[0]}\n  llmApiKey: &key {secrets[1]}\n"
+    )
+    target = OmpTarget(profile="one", config_root=root)
+    messages = ""
+    for dry_run in (True, False):
+        with pytest.raises(ValueError) as caught:
+            target.configure(_provider(), use_keychain=False, dry_run=dry_run)
+        messages += str(caught.value)
+    with pytest.raises(ValueError) as caught:
+        target.sync_state()
+    captured = capsys.readouterr()
+    messages += str(caught.value) + captured.out + captured.err
+    assert all(secret not in messages for secret in secrets)
+    assert not target.agent_dir.exists()
