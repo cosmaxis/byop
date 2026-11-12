@@ -77,6 +77,7 @@ Remove `--dry-run` to apply. Command-line arguments can expose keys to other pro
 
 | Command | Purpose |
 | --- | --- |
+| `byop --version` | Print version and exit |
 | `byop status` | Show the active provider and model limits |
 | `byop profile list` / `byop profile use NAME` | List or switch providers |
 | `byop profile export` | Print the active profile without its API key |
