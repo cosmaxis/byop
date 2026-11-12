@@ -108,16 +108,43 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_omp_path_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
-        "--profile",
-        dest="omp_profile",
-        help="OMP profile name (default: active OMP_PROFILE/PI_PROFILE).",
+        "--profile", dest="omp_profiles", action="append",
+        help="OMP profile name (repeatable; default: active OMP_PROFILE/PI_PROFILE).",
     )
     p.add_argument(
-        "--omp-models-path",
-        type=Path,
-        help="Explicit OMP model file path (overrides profile selection).",
+        "--all-profiles", action="store_true",
+        help="Select global OMP config and all discovered named profiles.",
+    )
+    p.add_argument(
+        "--omp-models-path", type=Path,
+        help="Explicit OMP model file path (overrides a single profile selection).",
     )
 
+
+def _omp_target_kwargs(
+    profiles: list[str] | None, all_profiles: bool, models_path: Path | None,
+) -> dict[str, object]:
+    from .core.targets.omp import omp_config_root, profile_models_path
+
+    if all_profiles and profiles:
+        raise ValueError("--all-profiles cannot be combined with --profile.")
+    if models_path is not None:
+        if all_profiles or (profiles and len(profiles) > 1):
+            raise ValueError("--omp-models-path cannot be combined with multiple OMP profiles.")
+        return {"omp_models_path": models_path}
+    if profiles:
+        for profile in profiles:
+            if profile != "default":
+                profile_models_path(profile, omp_config_root())
+        return {"omp_profiles": list(dict.fromkeys(profiles))}
+    if all_profiles:
+        directory = omp_config_root() / "profiles"
+        names = sorted(
+            p.name for p in directory.iterdir()
+            if p.is_dir() and not p.is_symlink() and p.name == p.name.strip()
+        ) if directory.is_dir() else []
+        return {"omp_profiles": ["default", *(name for name in names if name != "default")]}
+    return {"omp_models_path": models_path} if models_path is not None else {}
 
 def _add_apply_args(p: argparse.ArgumentParser) -> None:
     """Args shared between ``apply`` and ``export-config``."""
@@ -154,16 +181,7 @@ def _add_apply_args(p: argparse.ArgumentParser) -> None:
         choices=["zed", "py", "omp", "claude", "codex", "opencode", "warp"],
         help="Restrict to specific target(s): zed, py, omp, claude, codex, opencode, warp (repeatable). Defaults to all detected/installed apps.",
     )
-    p.add_argument(
-        "--profile",
-        dest="omp_profile",
-        help="OMP profile name (default: active OMP_PROFILE/PI_PROFILE).",
-    )
-    p.add_argument(
-        "--omp-models-path",
-        type=Path,
-        help="Explicit OMP model file path (overrides profile selection).",
-    )
+    _add_omp_path_args(p)
     p.add_argument(
         "--claude-permission-mode",
         choices=["manual", "auto"],
@@ -235,8 +253,15 @@ def _main(argv: list[str] | None = None) -> int:
         argv = sys.argv[1:]
     argv = _inject_default_subcommand(argv)
     args = parser.parse_args(argv)
+    try:
+        _omp_target_kwargs(
+            getattr(args, "omp_profiles", None), getattr(args, "all_profiles", False),
+            getattr(args, "omp_models_path", None),
+        )
+    except ValueError as exc:
+        prompt.error(str(exc))
+        return 2
 
-    # No subcommand: route based on legacy flags vs. fresh user.
     if args.command is None:
         return _route_bare(parser, args)
     return _dispatch(parser, args)
@@ -264,8 +289,8 @@ def _inject_default_subcommand(argv: list[str] | None) -> list[str]:
 def _dispatch(parser, args) -> int:
     if args.command == "status":
         return _run_status(
-            omp_profile=getattr(args, "omp_profile", None),
-            omp_models_path=getattr(args, "omp_models_path", None),
+            omp_profiles=args.omp_profiles, all_profiles=args.all_profiles,
+            omp_models_path=args.omp_models_path,
         )
     if args.command == "apply":
         return _run_apply(args)
@@ -273,8 +298,8 @@ def _dispatch(parser, args) -> int:
         return _run_profile(args)
     if args.command == "doctor":
         return _run_doctor(
-            omp_profile=getattr(args, "omp_profile", None),
-            omp_models_path=getattr(args, "omp_models_path", None),
+            omp_profiles=args.omp_profiles, all_profiles=args.all_profiles,
+            omp_models_path=args.omp_models_path,
         )
     if args.command == "export-config":
         return _run_export(args)
@@ -322,11 +347,16 @@ def _short_path(path: Path | str) -> str:
 
 
 def _target_config_path(target: object) -> str:
-    for attr in ("settings_path", "config_path", "models_path"):
+    for attr in ("models_path", "settings_path", "config_path") if getattr(target, "name", None) == "omp" else ("settings_path", "config_path", "models_path"):
         val = getattr(target, attr, None)
         if val is not None:
             return _short_path(val)
     return ""
+
+
+def _target_label(target) -> str:
+    profile = getattr(target, "profile", None)
+    return f"{target.display_name} ({profile})" if profile else target.display_name
 
 
 def _safe_provider_names(target: object) -> list[str]:
@@ -472,7 +502,8 @@ def _make_args_for_apply(profile, api_key, prefs):
         env_key=prefs.get("use_env", False),
         skip_install=False,
         target=[],
-        omp_profile=None,
+        omp_profiles=None,
+        all_profiles=False,
         omp_models_path=None,
         config_file=None,
         conflict=None,
@@ -540,11 +571,13 @@ def _shared_keychain_conflict(server: str, api_key: str, exclude: str) -> bool:
 # status / apply / profile / doctor / export-config
 # ===========================================================================
 def _run_status(
-    *, omp_profile: str | None = None, omp_models_path: Path | None = None
+    *, omp_profiles: list[str] | None = None,
+    all_profiles: bool = False, omp_models_path: Path | None = None,
 ) -> int:
     """Print a status dashboard for the active profile + each target."""
     from .core import profiles as prof
     from .core.targets import available_targets
+    from .core.targets.omp import OmpTarget
 
     if not prof.profile_exists(prof.get_active_profile_name()):
         prompt.warn("No active profile. Run `byop` to get started.")
@@ -552,10 +585,9 @@ def _run_status(
 
     profile = prof.load_profile()
     target_kwargs: dict[str, object] = {"settings_path": Path.home() / ".config" / "zed" / "settings.json"}
-    if omp_profile is not None:
-        target_kwargs["omp_profile"] = omp_profile
-    if omp_models_path is not None:
-        target_kwargs["omp_models_path"] = omp_models_path
+    target_kwargs.update(
+        _omp_target_kwargs(omp_profiles, all_profiles, omp_models_path)
+    )
     targets = available_targets(**target_kwargs)  # type: ignore[arg-type]
 
     prompt.intro("byop", "status")
@@ -583,19 +615,28 @@ def _run_status(
         names = target.current_provider_names()
         installed = target.is_installed()
         cfg_path = _target_config_path(target)
+        label = _target_label(target)
+        try:
+            drift = target.sync_state() if isinstance(target, OmpTarget) else ([], [])
+        except (ValueError, OSError) as exc:
+            unconfigured += 1
+            prompt.step(label, f"could not inspect profile config · {exc}", status="error")
+            continue
         if not installed:
             if getattr(target, "is_present", target.is_installed)():
                 unconfigured += 1
-                prompt.step(target.display_name, "partially installed", status="warn")
+                prompt.step(label, f"partially installed · {cfg_path}", status="warn")
             else:
-                prompt.step(target.display_name, "not installed", status="skip")
-        elif profile.provider_name in names:
+                prompt.step(label, f"not installed · {cfg_path}", status="skip")
+        elif profile.provider_name in names and not any(drift):
             detail = f"configured · {cfg_path}" if cfg_path else "configured"
-            prompt.step(target.display_name, detail, status="ok")
+            prompt.step(label, detail, status="ok")
         else:
             unconfigured += 1
-            detail = f"not configured · {cfg_path}" if cfg_path else "not configured"
-            prompt.step(target.display_name, detail, status="warn")
+            detail = f"not configured · {cfg_path}" if profile.provider_name not in names else f"settings/MCP not synced · {cfg_path}"
+            prompt.step(label, detail, status="warn")
+            if drift[1]:
+                prompt.warn(f"{label}: global MCP configuration differs; restart OMP or run /mcp reload after applying.")
 
     prompt.outro(
         "Run `byop apply` to sync targets"
@@ -606,6 +647,14 @@ def _run_status(
 
 def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -> int:
     """Sync a provider to selected targets — the renamed default behavior."""
+    try:
+        _omp_target_kwargs(
+            getattr(args, "omp_profiles", None), getattr(args, "all_profiles", False),
+            getattr(args, "omp_models_path", None),
+        )
+    except ValueError as exc:
+        prompt.error(str(exc))
+        return 2
     # Backwards-compat: ``byop --export-config`` (no subcommand) used to be a
     # top-level flag. The apply subparser doesn't declare it; default it.
     if getattr(args, "export_config", False):
@@ -742,7 +791,7 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
     if not args.skip_install and not args.dry_run and not non_interactive:
         missing_targets = [t for t in targets if not t.is_installed()]
         if missing_targets:
-            missing_names = ", ".join(t.display_name for t in missing_targets)
+            missing_names = ", ".join(_target_label(t) for t in missing_targets)
             question = (
                 f"Install {missing_names} automatically?"
                 if len(missing_targets) == 1
@@ -758,21 +807,22 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
 
     for target in targets:
         try:
+            label = _target_label(target)
             conflict_action, has_collision = _pick(target)
             if conflict_action == "skip" and has_collision and target.name in {"claude", "codex"}:
-                prompt.step(target.display_name, "unchanged", status="skip")
+                prompt.step(label, "unchanged", status="skip")
                 continue
             was_installed = target.is_installed()
             if not was_installed and not args.skip_install and not args.dry_run:
                 if not install_approved:
-                    prompt.step(target.display_name, "skipped (not installed)", status="skip")
+                    prompt.step(label, "skipped (not installed)", status="skip")
                     continue
                 install_logs: list[str] = []
-                with prompt.spinner(f"Installing {target.display_name}…"):
+                with prompt.spinner(f"Installing {label}…"):
                     target.install(log=install_logs.append)
                 if not target.is_installed():
                     reason = install_logs[-1] if install_logs else "not installed"
-                    prompt.step(target.display_name, f"install failed · {reason}", status="error")
+                    prompt.step(label, f"install failed · {reason}", status="error")
                     success = False
                     continue
 
@@ -804,6 +854,8 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
                     kc.keychain_set(provider.keychain_server(), api_key)
                 profile_saved = True
 
+            if args.dry_run and target.name == "omp":
+                prompt.info(f"[dry-run] {label} · {_target_config_path(target)}")
             if args.dry_run:
                 target.configure(
                     target_provider,
@@ -824,12 +876,12 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
                     log=cfg_logs.append,
                 )
                 if any(line.startswith("Skip:") for line in cfg_logs):
-                    prompt.step(target.display_name, "unchanged", status="skip")
+                    prompt.step(label, "unchanged", status="skip")
                     for line in cfg_logs:
                         if line.startswith("Warning:"):
                             prompt.warn(line.removeprefix("Warning:").strip())
                 elif any("manual setup required" in line.lower() for line in cfg_logs):
-                    prompt.step(target.display_name, "manual setup required", status="warn")
+                    prompt.step(label, "manual setup required", status="warn")
                     for line in cfg_logs:
                         prompt.info(line)
                 else:
@@ -839,7 +891,7 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
                         parts.append("installed")
                     if cfg_path:
                         parts.append(cfg_path)
-                    prompt.step(target.display_name, " · ".join(parts) or "configured", status="ok")
+                    prompt.step(label, " · ".join(parts) or "configured", status="ok")
                     for line in cfg_logs:
                         if line.startswith("Warning:"):
                             prompt.warn(line.removeprefix("Warning:").strip())
@@ -858,10 +910,10 @@ def _run_apply(args: argparse.Namespace, *, interactive_session: bool = False) -
                 saved_profile.use_edit_predictions = target_provider.use_edit_predictions
                 prof.save_profile(saved_profile, allow_overwrite=True)
         except ValueError as exc:
-            prompt.error(f"{target.display_name}: {exc}")
+            prompt.error(f"{_target_label(target)}: {exc}")
             success = False
         except RuntimeError as exc:
-            prompt.error(f"{target.display_name}: {exc}")
+            prompt.error(f"{_target_label(target)}: {exc}")
             success = False
         except _ConflictRejected as exc:
             prompt.error(str(exc))
@@ -1084,48 +1136,61 @@ def _profile_edit_interactive() -> int:
 
 
 def _run_doctor(
-    *, omp_profile: str | None = None, omp_models_path: Path | None = None
+    *, omp_profiles: list[str] | None = None,
+    all_profiles: bool = False, omp_models_path: Path | None = None,
 ) -> int:
     """Detect drift between the active profile and each target's actual config."""
     from .core import profiles as prof
     from .core.targets import available_targets
+    from .core.targets.omp import OmpTarget
 
     if not prof.profile_exists(prof.get_active_profile_name()):
         prompt.warn("No active profile to check against.")
         return 0
     saved = prof.load_profile()
     target_kwargs: dict[str, object] = {"settings_path": Path.home() / ".config" / "zed" / "settings.json"}
-    if omp_profile is not None:
-        target_kwargs["omp_profile"] = omp_profile
-    if omp_models_path is not None:
-        target_kwargs["omp_models_path"] = omp_models_path
+    target_kwargs.update(
+        _omp_target_kwargs(omp_profiles, all_profiles, omp_models_path)
+    )
     targets = available_targets(**target_kwargs)  # type: ignore[arg-type]
 
     prompt.intro("byop", f"doctor · {saved.provider_name}")
     issues = 0
     checked = 0
     for target in targets:
+        label = _target_label(target)
         if not target.is_installed():
             if getattr(target, "is_present", target.is_installed)():
                 checked += 1
                 issues += 1
                 prompt.step(
-                    target.display_name,
+                    label,
                     f"partially installed → byop apply --target {target.name}",
                     status="warn",
                 )
+            elif target.name == "omp":
+                prompt.step(label, f"not installed · {_target_config_path(target)}", status="skip")
             continue
         checked += 1
         names = target.current_provider_names()
-        if saved.provider_name not in names:
+        try:
+            drift = target.sync_state() if isinstance(target, OmpTarget) else ([], [])
+        except (ValueError, OSError) as exc:
+            issues += 1
+            prompt.step(label, f"could not inspect profile config · {exc}", status="error")
+            continue
+        if saved.provider_name not in names or any(drift):
+            detail = f"missing {saved.provider_name}" if saved.provider_name not in names else "settings/MCP not synced"
             prompt.step(
-                target.display_name,
-                f"missing {saved.provider_name} → byop apply --target {target.name}",
+                label,
+                f"{detail} · {_target_config_path(target)} → byop apply --target {target.name}",
                 status="warn",
             )
+            if drift[1]:
+                prompt.warn(f"{label}: global-only/stale MCP config; restart OMP or run /mcp reload after applying.")
             issues += 1
         else:
-            prompt.step(target.display_name, "in sync", status="ok")
+            prompt.step(label, f"in sync · {_target_config_path(target)}", status="ok")
     if issues == 0:
         prompt.outro("No drift detected" if checked else "No installed tools detected")
         return 0
@@ -1136,39 +1201,37 @@ def _run_doctor(
 def _run_export(args: argparse.Namespace) -> int:
     """Print the byop-managed slice of every target's settings as JSON."""
     from .core.targets import available_targets
+    from .core.targets.omp import OmpTarget
 
     target_kwargs: dict[str, object] = {"settings_path": args.settings}
-    if getattr(args, "omp_profile", None) is not None:
-        target_kwargs["omp_profile"] = args.omp_profile
-    if getattr(args, "omp_models_path", None) is not None:
-        target_kwargs["omp_models_path"] = args.omp_models_path
+    target_kwargs.update(_omp_target_kwargs(
+        getattr(args, "omp_profiles", None), getattr(args, "all_profiles", False),
+        getattr(args, "omp_models_path", None),
+    ))
     all_targets = available_targets(**target_kwargs)  # type: ignore[arg-type]
-    by_name = {t.name: t for t in all_targets}
-
-    if args.target:
-        chosen = [by_name[n] for n in args.target if n in by_name]
-    else:
-        chosen = list(all_targets)
+    chosen = [t for t in all_targets if not args.target or t.name in args.target]
 
     out: dict = {}
+    omp_entries: dict = {}
+    multi_omp = sum(t.name == "omp" for t in chosen) > 1
     for target in chosen:
         try:
-            snapshot = target.export_config()
+            entry = target.export_config().get(target.name, {})
         except RuntimeError as exc:
-            prompt.error(f"{target.display_name}: {exc}")
+            prompt.error(f"{_target_label(target)}: {exc}")
             return 1
         if args.export_provider:
-            entry = snapshot.get(target.name, {})
             providers = entry.get("providers", {}) or {}
-            filtered = {
-                k: v for k, v in providers.items() if k == args.export_provider
-            }
-            if filtered:
-                entry = {**entry, "providers": filtered}
-                snapshot = {target.name: entry}
-            else:
+            filtered = {k: v for k, v in providers.items() if k == args.export_provider}
+            if not filtered:
                 continue
-        out.update(snapshot)
+            entry = {**entry, "providers": filtered}
+        if isinstance(target, OmpTarget) and multi_omp:
+            omp_entries[target.profile] = entry
+        else:
+            out[target.name] = entry
+    if omp_entries:
+        out["omp_profiles"] = omp_entries
 
     sys.stdout.write(json.dumps(out, indent=2, ensure_ascii=False) + "\n")
     sys.stdout.flush()
@@ -1336,18 +1399,18 @@ def _select_targets(
     from .core.targets import available_targets, detect_installed
 
     target_kwargs = {"settings_path": args.settings}
-    if getattr(args, "omp_profile", None) is not None:
-        target_kwargs["omp_profile"] = args.omp_profile
-    if getattr(args, "omp_models_path", None) is not None:
-        target_kwargs["omp_models_path"] = args.omp_models_path
+    target_kwargs.update(_omp_target_kwargs(
+        getattr(args, "omp_profiles", None), getattr(args, "all_profiles", False),
+        getattr(args, "omp_models_path", None),
+    ))
     for option in ("claude_permission_mode", "claude_auto_mode_model"):
         if getattr(args, option, None) is not None:
             target_kwargs[option] = getattr(args, option)
     all_targets = available_targets(**target_kwargs)
-    by_name = {t.name: t for t in all_targets}
 
     if args.target:
-        return [by_name[n] for n in args.target if n in by_name]
+        selected_names = set(args.target)
+        return [target for target in all_targets if target.name in selected_names]
 
     installed = detect_installed(all_targets)
     installed_names = {t.name for t in installed}
@@ -1355,7 +1418,7 @@ def _select_targets(
     if not interactive:
         return installed
 
-    labels = [target.display_name for target in all_targets]
+    labels = [_target_label(target) for target in all_targets]
     hints = []
     for target in all_targets:
         if target.name not in installed_names:

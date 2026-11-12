@@ -25,10 +25,105 @@ DEFAULT_MODELS_PATH = Path.home() / ".omp" / "agent" / "models.yml"
 
 def profile_models_path(profile: str, config_root: Path | None = None) -> Path:
     """Return the profile-scoped OMP models.yml path."""
-    if not profile or Path(profile).name != profile or profile in {".", ".."}:
+    if not profile or profile != profile.strip() or Path(profile).name != profile or profile in {".", ".."}:
         raise ValueError("OMP profile must be a simple directory name")
     root = config_root or (Path.home() / ".omp")
     return root / "profiles" / profile / "agent" / "models.yml"
+
+
+def omp_config_root() -> Path:
+    # OMP treats PI_CONFIG_DIR as HOME-relative even with a leading slash.
+    return Path.home() / (os.environ.get("PI_CONFIG_DIR") or ".omp").lstrip("/")
+
+
+def _settings_path(agent_dir: Path) -> Path:
+    return next(
+        (agent_dir / name for name in ("config.yml", "config.yaml") if (agent_dir / name).exists()),
+        agent_dir / "config.yml",
+    )
+
+
+def _settings_sections(text: str, path: Path) -> dict[str, str]:
+    """Split native YAML at top-level keys without rewriting user-owned sections."""
+    sections: dict[str, str] = {}
+    key = None
+    lines: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if not line.strip() or line.lstrip().startswith("#"):
+            lines.append(line)
+            continue
+        match = re.fullmatch(r"([A-Za-z][\w-]*):(?:\s.*)?", line.rstrip("\r\n"))
+        if match:
+            if key is not None:
+                sections[key] = "".join(lines)
+            lines = (lines if key is None else []) + [line]
+            key = match.group(1)
+            if key in sections:
+                raise ValueError(f"Duplicate top-level setting in {path}")
+        elif key is None or not line[0].isspace():
+            raise ValueError(f"Unsupported OMP settings layout in {path}; edit it manually.")
+        else:
+            lines.append(line)
+    if key is not None:
+        sections[key] = "".join(lines)
+    return sections
+
+
+def _settings_children(section: str) -> tuple[str, str, int] | None:
+    lines = section.splitlines(keepends=True)
+    index = next(i for i, line in enumerate(lines) if line.strip() and not line.lstrip().startswith("#"))
+    if not re.fullmatch(r"[A-Za-z][\w-]*:\s*(?:#.*)?", lines[index].rstrip("\r\n")):
+        return None
+    body = lines[index + 1:]
+    first = next((line for line in body if line.strip() and not line.lstrip().startswith("#")), "")
+    if not first or first.lstrip().startswith("-"):
+        return None
+    indent = len(first) - len(first.lstrip())
+    if not indent:
+        return None
+    children = "".join(line[indent:] if line.startswith(" " * indent) else line for line in body)
+    return "".join(lines[:index + 1]), children, indent
+
+
+def _merge_settings(source_text: str, destination_text: str, path: Path) -> str:
+    """Overlay source leaves while retaining destination-only YAML and comments."""
+    source = _settings_sections(source_text, path)
+    destination = _settings_sections(destination_text, path)
+    if not source:
+        return destination_text
+    if not destination:
+        separator = "\n" if destination_text and not destination_text.endswith("\n") else ""
+        return destination_text + separator + source_text
+    for key, section in source.items():
+        source_children = _settings_children(section)
+        destination_children = _settings_children(destination[key]) if key in destination else None
+        if source_children and destination_children:
+            prefix, body, indent = destination_children
+            merged = _merge_settings(source_children[1], body, path)
+            destination[key] = prefix + "".join(
+                " " * indent + line if line.strip() else line
+                for line in merged.splitlines(keepends=True)
+            )
+        else:
+            destination[key] = section
+    result = ""
+    for section in destination.values():
+        if result and not result.endswith("\n"):
+            result += "\n"
+        result += section
+    return result
+
+
+def _read_mcp(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Could not parse {path}: {exc.msg}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("mcpServers", {}), dict):
+        raise ValueError(f"Invalid MCP configuration at {path}: expected mcpServers object")
+    return data
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -357,24 +452,102 @@ class OmpTarget(PyTarget):
         profile: str | None = None,
         config_root: Path | None = None,
     ) -> None:
+        selected = profile if profile is not None else os.environ.get(
+            "OMP_PROFILE", os.environ.get("PI_PROFILE", "")
+        )
+        selected = selected.strip()
+        root = config_root or omp_config_root()
+        if models_path is not None:
+            selected = "default"
+            agent_dir = models_path.parent
+        elif selected and selected != "default":
+            agent_dir = profile_models_path(selected, root).parent
+        else:
+            agent_override = os.environ.get("PI_CODING_AGENT_DIR") if config_root is None else None
+            agent_dir = Path(agent_override) if agent_override else root / "agent"
+        self.profile = selected or "default"
+        self.agent_dir = agent_dir
+        self.global_agent_dir = root / "agent"
+        self.settings_path = _settings_path(agent_dir)
+        self.mcp_path = agent_dir / "mcp.json"
         if models_path is None:
-            selected = profile if profile is not None else os.environ.get(
-                "OMP_PROFILE", os.environ.get("PI_PROFILE", "")
-            )
-            selected = selected.strip()
-            # OMP resolves PI_CONFIG_DIR under HOME, even when it starts with "/".
-            root = config_root or (Path.home() / (os.environ.get("PI_CONFIG_DIR") or ".omp").lstrip("/"))
-            if selected and selected != "default":
-                agent_dir = profile_models_path(selected, root).parent
-            else:
-                agent_override = os.environ.get("PI_CODING_AGENT_DIR") if config_root is None else None
-                agent_dir = Path(agent_override) if agent_override else root / "agent"
             models_path = next(
                 (agent_dir / name for name in ("models.yml", "models.yaml", "models.json")
                  if (agent_dir / name).exists()),
                 agent_dir / "models.yml",
             )
         super().__init__(models_path=models_path)
+
+    def _profile_file_changes(self) -> dict[Path, str]:
+        if self.profile == "default":
+            return {}
+        source_path = _settings_path(self.global_agent_dir)
+        source_text = source_path.read_text(encoding="utf-8") if source_path.exists() else ""
+        local_text = self.settings_path.read_text(encoding="utf-8") if self.settings_path.exists() else ""
+        merged_text = _merge_settings(source_text, local_text, self.settings_path)
+        global_mcp = _read_mcp(self.global_agent_dir / "mcp.json")
+        local_mcp = _read_mcp(self.mcp_path)
+        servers = {**local_mcp.get("mcpServers", {}), **global_mcp.get("mcpServers", {})}
+        merged_mcp = {**global_mcp, **local_mcp}
+        if servers or "mcpServers" in local_mcp:
+            merged_mcp["mcpServers"] = servers
+        changes: dict[Path, str] = {}
+        if merged_text != local_text:
+            changes[self.settings_path] = merged_text
+        if merged_mcp != local_mcp:
+            changes[self.mcp_path] = json.dumps(merged_mcp, indent=2) + "\n"
+        return changes
+
+    def sync_state(self) -> tuple[list[str], list[str]]:
+        """Return pending settings and MCP paths without exposing their contents."""
+        changes = self._profile_file_changes()
+        return (
+            [str(self.settings_path)] if self.settings_path in changes else [],
+            [str(self.mcp_path)] if self.mcp_path in changes else [],
+        )
+
+    def configure(
+        self,
+        provider: ProviderConfig,
+        *,
+        dry_run: bool = False,
+        use_keychain: bool = True,
+        use_env: bool = False,
+        conflict_action: str | None = None,
+        log: Callable[[str], None] = print,
+    ) -> None:
+        try:
+            changes = self._profile_file_changes()
+        except OSError as exc:
+            raise RuntimeError(f"Could not read OMP profile configuration: {exc}") from exc
+        super().configure(
+            provider, dry_run=dry_run, use_keychain=use_keychain, use_env=use_env,
+            conflict_action=conflict_action, log=log,
+        )
+        for path, text in changes.items():
+            kind = "MCP" if path == self.mcp_path else "settings"
+            if dry_run:
+                log(f"[dry-run] Would sync OMP {kind} to {path}")
+                continue
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("w", encoding="utf-8") as stream:
+                    os.fchmod(stream.fileno(), 0o600)
+                    stream.write(text)
+            except OSError as exc:
+                raise RuntimeError(f"Could not sync OMP configuration at {path}: {exc}") from exc
+            log(f"Synced OMP {kind} to {path}")
+            if path == self.mcp_path:
+                log("Warning: OMP MCP config changed; restart OMP or run /mcp reload.")
+
+    def export_config(self) -> dict:
+        entry = super().export_config()[self.name]
+        for block in entry["providers"].values():
+            if isinstance(block, dict) and "apiKey" in block:
+                block["apiKey"] = "[REDACTED]"
+        entry["settings_path"] = str(self.settings_path)
+        entry["mcp_path"] = str(self.mcp_path)
+        return {self.name: entry}
 
     def _api_key_ref(
         self, provider: ProviderConfig, *, use_keychain: bool | None = None, redact: bool = False
