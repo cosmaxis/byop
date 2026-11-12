@@ -14,8 +14,14 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Callable
+import warnings
+from collections.abc import Callable, MutableMapping
+from io import StringIO
 from pathlib import Path
+
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
+from ruamel.yaml.error import YAMLError, YAMLWarning
 
 from ..config import ProviderConfig
 from .py import PyTarget
@@ -25,10 +31,79 @@ DEFAULT_MODELS_PATH = Path.home() / ".omp" / "agent" / "models.yml"
 
 def profile_models_path(profile: str, config_root: Path | None = None) -> Path:
     """Return the profile-scoped OMP models.yml path."""
-    if not profile or Path(profile).name != profile or profile in {".", ".."}:
+    if not profile or profile != profile.strip() or Path(profile).name != profile or profile in {".", ".."}:
         raise ValueError("OMP profile must be a simple directory name")
     root = config_root or (Path.home() / ".omp")
     return root / "profiles" / profile / "agent" / "models.yml"
+
+
+def omp_config_root() -> Path:
+    # OMP treats PI_CONFIG_DIR as HOME-relative even with a leading slash.
+    return Path.home() / (os.environ.get("PI_CONFIG_DIR") or ".omp").lstrip("/")
+
+
+def _settings_path(agent_dir: Path) -> Path:
+    return next(
+        (agent_dir / name for name in ("config.yml", "config.yaml") if (agent_dir / name).exists()),
+        agent_dir / "config.yml",
+    )
+
+
+def _merge_settings(source_text: str, destination_text: str, path: Path) -> str:
+    """Overlay source leaves without losing profile-only values or YAML comments."""
+    yaml = YAML(typ="rt")
+    yaml.preserve_quotes = True
+    try:
+        with warnings.catch_warnings(action="error", category=YAMLWarning):
+            source = yaml.load(source_text)
+            destination = yaml.load(destination_text)
+            prefix = ""
+            if destination is None:
+                prefix = "".join(
+                    line[line.index("#"):] if "#" in line else line
+                    for line in destination_text.splitlines(keepends=True)
+                    if "#" in line or not line.strip()
+                )
+            source = CommentedMap() if source is None else source
+            destination = CommentedMap() if destination is None else destination
+            if not isinstance(source, MutableMapping) or not isinstance(destination, MutableMapping):
+                raise ValueError(f"OMP settings for {path} must be YAML mappings.")
+            seen: set[tuple[int, int]] = set()
+
+            def overlay(incoming: MutableMapping, current: MutableMapping) -> bool:
+                pair = id(incoming), id(current)
+                if pair in seen:
+                    return False
+                seen.add(pair)
+                changed = False
+                for key, value in incoming.items():
+                    if key in current and isinstance(value, MutableMapping) and isinstance(current[key], MutableMapping):
+                        changed = overlay(value, current[key]) or changed
+                    elif key not in current or current[key] != value or isinstance(current[key], bool) != isinstance(value, bool):
+                        current[key] = value
+                        changed = True
+                return changed
+
+            if not overlay(source, destination):
+                return destination_text
+            output = StringIO()
+            yaml.dump(destination, output)
+            separator = "\n" if prefix and not prefix.endswith("\n") else ""
+            return prefix + separator + output.getvalue()
+    except (YAMLError, YAMLWarning):
+        raise ValueError(f"Could not merge OMP settings for {path}; check global and profile YAML.") from None
+
+
+def _read_mcp(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Could not parse {path}: {exc.msg}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("mcpServers", {}), dict):
+        raise ValueError(f"Invalid MCP configuration at {path}: expected mcpServers object")
+    return data
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -357,24 +432,103 @@ class OmpTarget(PyTarget):
         profile: str | None = None,
         config_root: Path | None = None,
     ) -> None:
+        selected = profile if profile is not None else os.environ.get(
+            "OMP_PROFILE", os.environ.get("PI_PROFILE", "")
+        )
+        selected = selected.strip()
+        root = config_root or omp_config_root()
+        if models_path is not None:
+            selected = "default"
+            agent_dir = models_path.parent
+        elif selected and selected != "default":
+            agent_dir = profile_models_path(selected, root).parent
+        else:
+            agent_override = os.environ.get("PI_CODING_AGENT_DIR") if config_root is None else None
+            agent_dir = Path(agent_override) if agent_override else root / "agent"
+        self.profile = selected or "default"
+        self.agent_dir = agent_dir
+        self.global_agent_dir = root / "agent"
+        self.settings_path = _settings_path(agent_dir)
+        self.mcp_path = agent_dir / "mcp.json"
         if models_path is None:
-            selected = profile if profile is not None else os.environ.get(
-                "OMP_PROFILE", os.environ.get("PI_PROFILE", "")
-            )
-            selected = selected.strip()
-            # OMP resolves PI_CONFIG_DIR under HOME, even when it starts with "/".
-            root = config_root or (Path.home() / (os.environ.get("PI_CONFIG_DIR") or ".omp").lstrip("/"))
-            if selected and selected != "default":
-                agent_dir = profile_models_path(selected, root).parent
-            else:
-                agent_override = os.environ.get("PI_CODING_AGENT_DIR") if config_root is None else None
-                agent_dir = Path(agent_override) if agent_override else root / "agent"
             models_path = next(
                 (agent_dir / name for name in ("models.yml", "models.yaml", "models.json")
                  if (agent_dir / name).exists()),
                 agent_dir / "models.yml",
             )
         super().__init__(models_path=models_path)
+
+    def _profile_file_changes(self) -> dict[Path, str]:
+        if self.profile == "default":
+            return {}
+        source_path = _settings_path(self.global_agent_dir)
+        source_text = source_path.read_text(encoding="utf-8") if source_path.exists() else ""
+        local_text = self.settings_path.read_text(encoding="utf-8") if self.settings_path.exists() else ""
+        merged_text = _merge_settings(source_text, local_text, self.settings_path)
+        global_mcp = _read_mcp(self.global_agent_dir / "mcp.json")
+        local_mcp = _read_mcp(self.mcp_path)
+        servers = {**local_mcp.get("mcpServers", {}), **global_mcp.get("mcpServers", {})}
+        merged_mcp = {**global_mcp, **local_mcp}
+        if servers or "mcpServers" in local_mcp:
+            merged_mcp["mcpServers"] = servers
+        changes: dict[Path, str] = {}
+        if merged_text != local_text:
+            changes[self.settings_path] = merged_text
+        if merged_mcp != local_mcp:
+            changes[self.mcp_path] = json.dumps(merged_mcp, indent=2) + "\n"
+        return changes
+
+    def sync_state(self) -> tuple[list[str], list[str]]:
+        """Return pending settings and MCP paths without exposing their contents."""
+        changes = self._profile_file_changes()
+        return (
+            [str(self.settings_path)] if self.settings_path in changes else [],
+            [str(self.mcp_path)] if self.mcp_path in changes else [],
+        )
+
+    def configure(
+        self,
+        provider: ProviderConfig,
+        *,
+        dry_run: bool = False,
+        use_keychain: bool = True,
+        use_env: bool = False,
+        conflict_action: str | None = None,
+        log: Callable[[str], None] = print,
+    ) -> None:
+        try:
+            skipped = conflict_action == "skip" and provider.provider_name in self.current_provider_names()
+            changes = {} if skipped else self._profile_file_changes()
+        except OSError as exc:
+            raise RuntimeError(f"Could not read OMP profile configuration: {exc}") from exc
+        super().configure(
+            provider, dry_run=dry_run, use_keychain=use_keychain, use_env=use_env,
+            conflict_action=conflict_action, log=log,
+        )
+        for path, text in changes.items():
+            kind = "MCP" if path == self.mcp_path else "settings"
+            if dry_run:
+                log(f"[dry-run] Would sync OMP {kind} to {path}")
+                continue
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("w", encoding="utf-8") as stream:
+                    os.fchmod(stream.fileno(), 0o600)
+                    stream.write(text)
+            except OSError as exc:
+                raise RuntimeError(f"Could not sync OMP configuration at {path}: {exc}") from exc
+            log(f"Synced OMP {kind} to {path}")
+            if path == self.mcp_path:
+                log("Warning: OMP MCP config changed; restart OMP or run /mcp reload.")
+
+    def export_config(self) -> dict:
+        entry = super().export_config()[self.name]
+        for block in entry["providers"].values():
+            if isinstance(block, dict) and "apiKey" in block:
+                block["apiKey"] = "[REDACTED]"
+        entry["settings_path"] = str(self.settings_path)
+        entry["mcp_path"] = str(self.mcp_path)
+        return {self.name: entry}
 
     def _api_key_ref(
         self, provider: ProviderConfig, *, use_keychain: bool | None = None, redact: bool = False

@@ -5,6 +5,7 @@ Add a new application by implementing a target module and listing it here.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from .base import Target
@@ -31,7 +32,8 @@ ALL_TARGETS: list[type[Target]] = [
 def available_targets(
     settings_path: Path | None = None,
     *,
-    omp_profile: str | None = None,
+    omp_profiles: Sequence[str] | None = None,
+    omp_root: Path | None = None,
     omp_models_path: Path | None = None,
     claude_permission_mode: str | None = None,
     claude_auto_mode_model: str | None = None,
@@ -42,7 +44,10 @@ def available_targets(
         if cls is ZedTarget and settings_path is not None:
             targets.append(cls(settings_path=settings_path))
         elif cls is OmpTarget:
-            targets.append(cls(models_path=omp_models_path, profile=omp_profile))
+            if omp_profiles is not None:
+                targets.extend(cls(profile=profile, config_root=omp_root) for profile in omp_profiles)
+            else:
+                targets.append(cls(models_path=omp_models_path, config_root=omp_root))
         elif cls is ClaudeTarget:
             targets.append(cls(
                 permission_mode=claude_permission_mode,
